@@ -1,6 +1,6 @@
 # LibreTranslate WP
 
-**Translate your WordPress site on-the-fly using a local instance of LibreTranslate (http://localhost:8585).**  
+**Translate your WordPress site on-the-fly using a local instance of LibreTranslate (http://localhost:5000).**  
 Includes smart caching, user language selection, HTML-aware translation, and an admin interface.
 
 ---
