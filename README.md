@@ -16,6 +16,8 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 - ⚙️ **Admin panel**:
   - Clear cache with one click.
   - Choose which target languages are allowed (restrict visible languages).
+  - Excluded words (settings words that no need translations)
+  - Changing URL and port (also enable local or remote url for libretranslate API)
 - 🛡️ Fully self-hosted. No external API or keys required.
 
 ---
