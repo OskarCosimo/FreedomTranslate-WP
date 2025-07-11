@@ -22,7 +22,7 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 
 ## 🚀 Requirements
 
-- WordPress 5.0 or newer
+- WordPress 5.x or 6.x or newer
 - PHP 7.4+
 - A local instance of [LibreTranslate](https://github.com/uav4geo/LibreTranslate) running on `http://localhost:5000` (if not, you can edit the url or the port in this php file)
 
