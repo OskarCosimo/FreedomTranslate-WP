@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: LibreTranslate WP
-Description: Translate on-the-fly with LibreTranslate (localhost:5000) + cache and language selection
-Version: 1.4.0
+Description: Translate on-the-fly with LibreTranslate (localhost or remote) + cache and language selection
+Version: 1.2.0
 Author: Freedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -76,7 +76,6 @@ add_shortcode('libretranslate_selector', 'lt_language_selector_shortcode');
 function lt_protect_excluded_words_in_html($html, $excluded_words) {
     $dom = new DOMDocument();
     libxml_use_internal_errors(true);
-    // Load HTML with UTF-8 encoding
     $dom->loadHTML(mb_convert_encoding($html, 'HTML-ENTITIES', 'UTF-8'));
     libxml_clear_errors();
 
@@ -91,11 +90,11 @@ function lt_protect_excluded_words_in_html($html, $excluded_words) {
             $word = trim($word);
             if ($word === '') continue;
 
-            // Word boundary, case-insensitive Unicode match
+            // Match word anywhere (not limited to \b)
             $pattern = '/(?<!\p{L})' . preg_quote($word, '/') . '(?!\p{L})/ui';
 
             if (preg_match($pattern, $text)) {
-                $placeholder = '%%LTEXCL' . $i . '%%';
+                $placeholder = 'LTEXCL_' . substr(md5($word), 0, 8);
                 $text = preg_replace($pattern, $placeholder, $text);
                 $placeholders[$placeholder] = $word;
             }
@@ -103,10 +102,7 @@ function lt_protect_excluded_words_in_html($html, $excluded_words) {
         $textNode->nodeValue = $text;
     }
 
-    // Save back HTML, remove doctype and <html><body> wrapper
     $html = $dom->saveHTML();
-
-    // Remove added doctype, html, body tags by DOMDocument
     $html = preg_replace('~<(?:!DOCTYPE|/?(?:html|body))[^>]*>\s*~i', '', $html);
 
     return [$html, $placeholders];
@@ -114,8 +110,12 @@ function lt_protect_excluded_words_in_html($html, $excluded_words) {
 
 // Restore placeholders with original excluded words
 function lt_restore_excluded_words_in_html($text, $placeholders) {
-    return str_replace(array_keys($placeholders), array_values($placeholders), $text);
+    foreach ($placeholders as $placeholder => $word) {
+    $text = str_replace($placeholder, $word, $text);
 }
+    return $text;
+}
+
 
 // Perform translation with LibreTranslate and cache it
 function lt_translate($text, $source, $target, $format = 'text') {
@@ -134,7 +134,7 @@ function lt_translate($text, $source, $target, $format = 'text') {
         foreach ($excluded_words as $i => $word) {
             $word = trim($word);
             if ($word === '') continue;
-            $placeholder = '%%LTEXCL' . $i . '%%';
+            $placeholder = 'LTEXCL_' . substr(md5($word), 0, 8);
             $pattern = '/\b' . preg_quote($word, '/') . '\b/ui';
             $text = preg_replace($pattern, $placeholder, $text);
             $placeholders[$placeholder] = $word;
@@ -284,6 +284,7 @@ if (filter_var($url, FILTER_VALIDATE_URL) && preg_match('/^https?:\/\//', $url))
     echo '<div class="updated"><p>API URL saved.</p></div>';
 } else {
     echo '<div class="error"><p>Invalid API URL. Please enter a valid http or https URL.</p></div>';
+}
 }
 		?>
         <hr />
