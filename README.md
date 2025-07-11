@@ -26,7 +26,7 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 
 - WordPress 5.x or 6.x or newer
 - PHP 7.4+
-- A local instance of [LibreTranslate](https://github.com/uav4geo/LibreTranslate) running on `http://localhost:5000` (if not, you can edit the url or the port in this php file)
+- A local instance of [LibreTranslate](https://github.com/uav4geo/LibreTranslate) running on `http://localhost:5000` (if not, you can edit the url or the port in the admin panel)
 
 ---
 
@@ -35,7 +35,7 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 1. Clone or download this repository.
 2. Upload the plugin to your WordPress `/wp-content/plugins/` directory.
 3. Activate it from the WordPress **Plugins** admin screen.
-4. Ensure that your LibreTranslate server is running at `http://localhost:5000` (you can edit this php file with a custom url or custom port).
+4. Ensure that your LibreTranslate server is running at `http://localhost:5000` (you can edit the field in the admin panel with a custom url or custom port).
 
 ---
 
