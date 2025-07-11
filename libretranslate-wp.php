@@ -278,11 +278,12 @@ function lt_admin_page() {
 </form>
 		<?php
 		if (isset($_POST['lt_save_api_url'])) {
-    $url = esc_url_raw($_POST['lt_api_url']);
-    if (!empty($url)) {
-        update_option(LT_API_URL_OPTION, $url);
-        echo '<div class="updated"><p>API URL saved.</p></div>';
-    }
+    $url = trim($_POST['lt_api_url']);
+if (filter_var($url, FILTER_VALIDATE_URL) && preg_match('/^https?:\/\//', $url)) {
+    update_option(LT_API_URL_OPTION, esc_url_raw($url));
+    echo '<div class="updated"><p>API URL saved.</p></div>';
+} else {
+    echo '<div class="error"><p>Invalid API URL. Please enter a valid http or https URL.</p></div>';
 }
 		?>
         <hr />
