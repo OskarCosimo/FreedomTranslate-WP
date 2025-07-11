@@ -33,7 +33,7 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 1. Clone or download this repository.
 2. Upload the plugin to your WordPress `/wp-content/plugins/` directory.
 3. Activate it from the WordPress **Plugins** admin screen.
-4. Ensure that your LibreTranslate server is running at `http://localhost:5000` (you can modificy this php file with a custom url or custom port).
+4. Ensure that your LibreTranslate server is running at `http://localhost:5000` (you can edit this php file with a custom url or custom port).
 
 ---
 
