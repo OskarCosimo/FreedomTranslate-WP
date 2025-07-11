@@ -1,6 +1,6 @@
 # LibreTranslate WP
 
-**Translate your WordPress site on-the-fly using a local instance of LibreTranslate (http://localhost:5000).**  
+**Translate your WordPress site on-the-fly using a local instance of LibreTranslate (http://localhost:8585).**  
 Includes smart caching, user language selection, HTML-aware translation, and an admin interface.
 
 ---
@@ -22,9 +22,9 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 
 ## 🚀 Requirements
 
-- WordPress 5.x or 6.x or newer
+- WordPress 5.0 or newer
 - PHP 7.4+
-- A local instance of [LibreTranslate](https://github.com/uav4geo/LibreTranslate) running on `http://localhost:5000`
+- A local instance of [LibreTranslate](https://github.com/uav4geo/LibreTranslate) running on `http://localhost:5000` (if not, you can edit the url or the port in this php file)
 
 ---
 
@@ -33,7 +33,7 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 1. Clone or download this repository.
 2. Upload the plugin to your WordPress `/wp-content/plugins/` directory.
 3. Activate it from the WordPress **Plugins** admin screen.
-4. Ensure that your LibreTranslate server is running at `http://localhost:5000` (if not, you can change the url or the port manually inside the plugin file).
+4. Ensure that your LibreTranslate server is running at `http://localhost:5000` (you can modificy this php file with a custom url or custom port).
 
 ---
 
@@ -45,62 +45,86 @@ Use the shortcode anywhere in your theme or posts:
 
 [libretranslate_selector]
 
-This will render a <select> dropdown with all available languages (unless restricted from the admin panel).
 
-## Exclude Posts or Pages
-When editing a post or page, check the box "Exclude this page/post from the automatic translation" in the LibreTranslate box.
+This will render a `<select>` dropdown with all available languages (unless restricted from the admin panel).
+
+### Exclude Posts or Pages
+
+When editing a post or page, check the box:
+
+> **"Exclude this page/post from the automatic translation"**
+
+in the **LibreTranslate** box on the right-hand sidebar.
+
+---
 
 ## 🛠️ Admin Panel
-Navigate to:
-WordPress Admin → Settings → LibreTranslate
+
+Navigate to:  
+**WordPress Admin → Settings → LibreTranslate**
 
 You’ll find:
+- 🔁 A button to **clear the translation cache**.
+- 🌐 A list of supported languages — uncheck the ones you don’t want to make available.
 
-🔁 A button to clear the translation cache.
+Only the selected languages will appear in the `[libretranslate_selector]`.
 
-🌐 A list of supported languages — uncheck the ones you don’t want to make available.
-
-Only the selected languages will appear in the [libretranslate_selector].
+---
 
 ## 📝 Supported Languages
-Code	Language
-en	English
-it	Italian
-es	Spanish
-fr	French
-de	German
-ru	Russian
-pt	Portuguese
-ar	Arabic
-az	Azerbaijani
-zh	Chinese
-cs	Czech
-da	Danish
-nl	Dutch
-fi	Finnish
-el	Greek
-he	Hebrew
-hi	Hindi
-hu	Hungarian
-id	Indonesian
-ga	Irish
-ja	Japanese
-ko	Korean
-no	Norwegian
-pl	Polish
-ro	Romanian
-sk	Slovak
-sv	Swedish
-tr	Turkish
-uk	Ukrainian
-vi	Vietnamese
+
+| Code | Language       |
+|------|----------------|
+| en   | English        |
+| it   | Italian        |
+| es   | Spanish        |
+| fr   | French         |
+| de   | German         |
+| ru   | Russian        |
+| pt   | Portuguese     |
+| ar   | Arabic         |
+| az   | Azerbaijani    |
+| zh   | Chinese        |
+| cs   | Czech          |
+| da   | Danish         |
+| nl   | Dutch          |
+| fi   | Finnish        |
+| el   | Greek          |
+| he   | Hebrew         |
+| hi   | Hindi          |
+| hu   | Hungarian      |
+| id   | Indonesian     |
+| ga   | Irish          |
+| ja   | Japanese       |
+| ko   | Korean         |
+| no   | Norwegian      |
+| pl   | Polish         |
+| ro   | Romanian       |
+| sk   | Slovak         |
+| sv   | Swedish        |
+| tr   | Turkish        |
+| uk   | Ukrainian      |
+| vi   | Vietnamese     |
 
 You can limit which of these are available via the admin interface.
 
+---
+
 ## ⚠️ Notes
-LibreTranslate must be running and reachable at http://localhost:5000/translate.
-You can eventually change the port (or the entire url) inside the php plugin file.
 
-It supports both text and html formats — this plugin uses the HTML-aware mode for accurate frontend rendering.
+- LibreTranslate must be running and reachable at `http://localhost:5000/translate` (or a custom url or custom port).
+- It supports both `text` and `html` formats — this plugin uses the HTML-aware mode for accurate frontend rendering.
+- Translations are cached using WordPress options. Cache can be cleared anytime.
 
-Translations are cached using WordPress options. Cache can be cleared anytime.
+---
+
+## 🧑‍💻 Author
+
+**Freedom**  
+2025 – Licensed under [GPLv3 or later](LICENSE.txt)
+
+---
+
+## 📄 License
+
+This plugin is released under the GNU GPLv3 license. See [LICENSE.txt](LICENSE.txt) for full details.
