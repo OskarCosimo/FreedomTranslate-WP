@@ -18,6 +18,7 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
   - Choose which target languages are allowed (restrict visible languages).
   - Excluded words (settings words that no need translations)
   - Changing URL and port (also enable local or remote url for libretranslate API)
+  - Changing the api key (optional)
 - 🛡️ Fully self-hosted. No external API or keys required.
 
 ---
@@ -67,6 +68,10 @@ Navigate to:
 
 You’ll find:
 - 🔁 A button to **clear the translation cache**.
+- Choose which target languages are allowed (restrict visible languages).
+- Excluded words (settings words that no need translations)
+- Changing URL and port (also enable local or remote url for libretranslate API)
+- Changing the api key (optional)
 - 🌐 A list of supported languages — uncheck the ones you don’t want to make available.
 
 Only the selected languages will appear in the `[libretranslate_selector]`.
