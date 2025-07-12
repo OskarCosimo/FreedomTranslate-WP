@@ -123,13 +123,13 @@ You can limit which of these are available via the admin interface.
 ## 🧑‍💻 Author
 
 **Freedom**  
-2025 – Licensed under [GPLv3 or later](LICENSE.txt)
+2025 – Licensed under [GPLv3 or later](LICENSE)
 
 ---
 
 ## 📄 License
 
-This plugin is released under the GNU GPLv3 license. See [LICENSE.txt](LICENSE.txt) for full details.
+This plugin is released under the GNU GPLv3 license. See [LICENSE](LICENSE) for full details.
 
 == Disclaimer ==
 
