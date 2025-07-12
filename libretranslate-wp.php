@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: LibreTranslate WP
-Description: Translate on-the-fly with LibreTranslate (localhost or remote) + cache and language selection
-Version: 1.4.0
+Description: Translate on-the-fly with LibreTranslate (localhost:5000) + cache and language selection
+Version: 1.4.1
 Author: Freedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -14,6 +14,7 @@ define('LT_CACHE_PREFIX', 'libretranslate_cache_');
 define('LT_WORDS_EXCLUDE_OPTION', 'libretranslate_exclude_words');
 define('LT_LANGUAGES_OPTION', 'libretranslate_enabled_languages');
 define('LT_API_URL_OPTION', 'libretranslate_api_url');
+define('LT_API_KEY_OPTION', 'libretranslate_api_key');
 define('LT_API_URL_DEFAULT', 'http://localhost:5000/translate');
 
 // Check if a target language is enabled
@@ -108,29 +109,26 @@ function lt_protect_excluded_words_in_html($html, $excluded_words) {
     return [$html, $placeholders];
 }
 
-// Restore placeholders with original excluded words
 function lt_restore_excluded_words_in_html($text, $placeholders) {
-    foreach ($placeholders as $placeholder => $word) {
-    $text = str_replace($placeholder, $word, $text);
-}
+    foreach ($placeholders as $placeholder => $original_word) {
+        // Sostituisci tutti i placeholder case-insensitive con la parola originale fissa così com'è
+        $pattern = '/' . preg_quote($placeholder, '/') . '/i';
+        $text = preg_replace($pattern, $original_word, $text);
+    }
     return $text;
 }
-
 
 // Perform translation with LibreTranslate and cache it
 function lt_translate($text, $source, $target, $format = 'text') {
     if (!function_exists('wp_remote_post')) return $text;
     if (trim($text) === '' || $source === $target || !lt_is_language_enabled($target)) return $text;
 
-    // Load excluded words from admin settings
     $excluded_words = get_option(LT_WORDS_EXCLUDE_OPTION, []);
 
-    // Only protect excluded words if translating html content
     if ($format === 'html' && !empty($excluded_words)) {
         list($text, $placeholders) = lt_protect_excluded_words_in_html($text, $excluded_words);
     } else {
         $placeholders = [];
-        // For plain text, do a simple replacement like before
         foreach ($excluded_words as $i => $word) {
             $word = trim($word);
             if ($word === '') continue;
@@ -141,21 +139,27 @@ function lt_translate($text, $source, $target, $format = 'text') {
         }
     }
 
-    // Generate cache key
     $cache_key = 'lt_' . md5($text . $source . $target . $format);
     $cached = get_option($cache_key, false);
     if ($cached !== false) return $cached;
 
-    // Send to LibreTranslate
     $api_url = get_option(LT_API_URL_OPTION, LT_API_URL_DEFAULT);
-	$response = wp_remote_post($api_url, [
-        'body' => [
-            'q' => $text,
-            'source' => $source,
-            'target' => $target,
-            'format' => $format
-        ],
-        'timeout' => 60
+    $api_key = get_option(LT_API_KEY_OPTION, '');
+
+    $body = [
+        'q' => $text,
+        'source' => $source,
+        'target' => $target,
+        'format' => $format
+    ];
+
+    if (!empty($api_key)) {
+        $body['api_key'] = $api_key;
+    }
+
+    $response = wp_remote_post($api_url, [
+        'body' => $body,
+        'timeout' => 120
     ]);
 
     if (is_wp_error($response)) return $text;
@@ -165,14 +169,11 @@ function lt_translate($text, $source, $target, $format = 'text') {
 
     $translated = $json['translatedText'];
 
-    // Restore original excluded words placeholders with original words
     if (!empty($placeholders)) {
         $translated = lt_restore_excluded_words_in_html($translated, $placeholders);
     }
 
-    // Save in cache
     update_option($cache_key, $translated);
-
     return $translated;
 }
 
@@ -275,6 +276,11 @@ function lt_admin_page() {
     <h3>LibreTranslate API URL</h3>
     <input type="text" name="lt_api_url" style="width: 400px;" value="<?php echo esc_attr(get_option(LT_API_URL_OPTION, LT_API_URL_DEFAULT)); ?>" />
     <p><input type="submit" name="lt_save_api_url" class="button button-primary" value="Save API URL" /></p>
+<hr />
+<h3>LibreTranslate API Key (optional)</h3>
+<input type="text" name="lt_api_key" style="width: 400px;" value="<?php echo esc_attr(get_option(LT_API_KEY_OPTION, '')) ?>" />
+<p><input type="submit" name="lt_save_api_key" class="button button-primary" value="Save API Key" /></p>
+
 </form>
 		<?php
 		if (isset($_POST['lt_save_api_url'])) {
@@ -285,6 +291,11 @@ if (filter_var($url, FILTER_VALIDATE_URL) && preg_match('/^https?:\/\//', $url))
 } else {
     echo '<div class="error"><p>Invalid API URL. Please enter a valid http or https URL.</p></div>';
 }
+}
+if (isset($_POST['lt_save_api_key'])) {
+    $key = sanitize_text_field($_POST['lt_api_key']);
+    update_option(LT_API_KEY_OPTION, $key);
+    echo '<div class="updated"><p>API Key saved.</p></div>';
 }
 		?>
         <hr />
