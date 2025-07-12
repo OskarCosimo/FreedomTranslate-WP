@@ -130,3 +130,8 @@ You can limit which of these are available via the admin interface.
 ## 📄 License
 
 This plugin is released under the GNU GPLv3 license. See [LICENSE.txt](LICENSE.txt) for full details.
+
+== Disclaimer ==
+
+This plugin is not affiliated with or endorsed by LibreTranslate or its developers.  
+"LibreTranslate" is a collaborative open source project. The name is used solely to describe the API that this plugin interacts with.
