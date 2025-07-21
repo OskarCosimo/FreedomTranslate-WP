@@ -1,6 +1,6 @@
 # Freedom Translate WP
 
-**Translate your WordPress site on-the-fly using a local instance of LibreTranslate (http://localhost:5000) or a remote URL with API.**  
+**Translate your WordPress site on-the-fly using a local instance of LibreTranslate (localhost:5000) or a remote URL with API.**  
 Includes smart caching, user language selection, HTML-aware translation, and an admin interface.
 
 ---
