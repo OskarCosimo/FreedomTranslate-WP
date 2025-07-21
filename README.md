@@ -1,6 +1,6 @@
-# LibreTranslate WP
+# Freedom Translate WP
 
-**Translate your WordPress site on-the-fly using a local instance of LibreTranslate (http://localhost:5000).**  
+**Translate your WordPress site on-the-fly using a local instance of LibreTranslate (http://localhost:5000) or a remote URL with API.**  
 Includes smart caching, user language selection, HTML-aware translation, and an admin interface.
 
 ---
@@ -10,7 +10,7 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 - 🌐 **Real-time translation** of all frontend content (titles, post content, home, etc.).
 - 💡 **No need to translate posts manually** or store multiple versions.
 - 📦 **Caching system** to avoid repeating translation requests.
-- 🌍 **Language selector** via shortcode `[libretranslate_selector]`.
+- 🌍 **Language selector** via shortcode `[freedomtranslate_selector]`.
 - 🧠 **Automatic browser language detection**.
 - 🛑 **Exclude specific pages or posts** from being translated via a checkbox in the editor.
 - ⚙️ **Admin panel**:
@@ -36,7 +36,7 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 1. Clone or download this repository.
 2. Upload the plugin to your WordPress `/wp-content/plugins/` directory.
 3. Activate it from the WordPress **Plugins** admin screen.
-4. Ensure that your LibreTranslate server is running at `http://localhost:5000` (you can edit the field in the admin panel with a custom url or custom port).
+4. Ensure that your LibreTranslate server is running at `http://localhost:5000` (or you can edit the field in the admin panel with a custom url or custom port).
 
 ---
 
@@ -46,7 +46,7 @@ Includes smart caching, user language selection, HTML-aware translation, and an 
 
 Use the shortcode anywhere in your theme or posts:
 
-[libretranslate_selector]
+[freedomtranslate_selector]
 
 
 This will render a `<select>` dropdown with all available languages (unless restricted from the admin panel).
@@ -57,24 +57,24 @@ When editing a post or page, check the box:
 
 > **"Exclude this page/post from the automatic translation"**
 
-in the **LibreTranslate** box on the right-hand sidebar.
+in the **Freedom Translate** box on the right-hand sidebar.
 
 ---
 
 ## 🛠️ Admin Panel
 
 Navigate to:  
-**WordPress Admin → Settings → LibreTranslate**
+**WordPress Admin → Settings → Freedom Translate**
 
 You’ll find:
 - 🔁 A button to **clear the translation cache**.
 - Choose which target languages are allowed (restrict visible languages).
 - Excluded words (settings words that no need translations)
-- Changing URL and port (also enable local or remote url for libretranslate API)
+- Changing URL and port (also enable local or remote url for libretranslate API or similar)
 - Changing the api key (optional)
 - 🌐 A list of supported languages — uncheck the ones you don’t want to make available.
 
-Only the selected languages will appear in the `[libretranslate_selector]`.
+Only the selected languages will appear in the `[freedomtranslate_selector]`.
 
 ---
 
