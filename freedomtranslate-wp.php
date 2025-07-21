@@ -117,10 +117,11 @@ function freedomtranslate_protect_excluded_words_in_html($html, $excluded_words)
             $word = trim($word);
             if ($word === '') continue;
 
+            // Word boundary, unicode-aware, case-insensitive
             $pattern = '/(?<!\p{L})' . preg_quote($word, '/') . '(?!\p{L})/ui';
 
             if (preg_match($pattern, $text)) {
-                $placeholder = 'FREEDOMTRANSLATE_EXCL_' . substr(md5($word), 0, 8);
+                $placeholder = substr(md5($word), 0, 8);
                 $text = preg_replace($pattern, $placeholder, $text);
                 $placeholders[$placeholder] = $word;
             }
@@ -140,6 +141,7 @@ function freedomtranslate_protect_excluded_words_in_html($html, $excluded_words)
 function freedomtranslate_restore_excluded_words_in_html($text, $placeholders) {
     foreach ($placeholders as $placeholder => $original_word) {
         $pattern = '/' . preg_quote($placeholder, '/') . '/i';
+        // Ripristina esattamente la parola originale, senza alterazioni
         $text = preg_replace($pattern, $original_word, $text);
     }
     return $text;
@@ -161,7 +163,7 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text') {
         foreach ($excluded_words as $word) {
             $word = trim($word);
             if ($word === '') continue;
-            $placeholder = 'FREEDOMTRANSLATE_EXCL_' . substr(md5($word), 0, 8);
+            $placeholder = substr(md5($word), 0, 8);
             $pattern = '/\b' . preg_quote($word, '/') . '\b/ui';
             $text = preg_replace($pattern, $placeholder, $text);
             $placeholders[$placeholder] = $word;
