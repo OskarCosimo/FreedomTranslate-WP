@@ -1,7 +1,7 @@
 <?php
 /*
-Plugin Name: LibreTranslate WP
-Description: Translate on-the-fly with LibreTranslate (localhost:5000) + cache and language selection
+Plugin Name: FreedomTranslate WP
+Description: Translate on-the-fly with LibreTranslate (localhost:5000) or remote URL with API + cache and language selection
 Version: 1.4.1
 Author: Freedom
 License: GPLv3 or later
@@ -10,11 +10,11 @@ License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
 if (!defined('ABSPATH')) exit; // Block direct access
 
-define('LT_CACHE_PREFIX', 'libretranslate_cache_');
-define('LT_WORDS_EXCLUDE_OPTION', 'libretranslate_exclude_words');
-define('LT_LANGUAGES_OPTION', 'libretranslate_enabled_languages');
-define('LT_API_URL_OPTION', 'libretranslate_api_url');
-define('LT_API_KEY_OPTION', 'libretranslate_api_key');
+define('LT_CACHE_PREFIX', 'freedomtranslate_cache_');
+define('LT_WORDS_EXCLUDE_OPTION', 'freedomtranslate_exclude_words');
+define('LT_LANGUAGES_OPTION', 'freedomtranslate_enabled_languages');
+define('LT_API_URL_OPTION', 'freedomtranslate_api_url');
+define('LT_API_KEY_OPTION', 'freedomtranslate_api_key');
 define('LT_API_URL_DEFAULT', 'http://localhost:5000/translate');
 
 // Check if a target language is enabled
@@ -32,7 +32,7 @@ function lt_get_user_lang() {
     }
 
     $browser_lang = isset($_SERVER['HTTP_ACCEPT_LANGUAGE']) ? substr($_SERVER['HTTP_ACCEPT_LANGUAGE'], 0, 2) : 'en';
-    $enabled = get_option('libretranslate_enabled_languages', []);
+    $enabled = get_option('freedomtranslate_enabled_languages', []);
     return in_array($browser_lang, $enabled) ? $browser_lang : 'en';
 }
 
@@ -71,7 +71,7 @@ function lt_language_selector_shortcode() {
     $html .= '</select></form>';
     return $html;
 }
-add_shortcode('libretranslate_selector', 'lt_language_selector_shortcode');
+add_shortcode('freedomtranslate_selector', 'lt_language_selector_shortcode');
 
 // Protect excluded words inside HTML text nodes replacing them with placeholders
 function lt_protect_excluded_words_in_html($html, $excluded_words) {
@@ -118,7 +118,7 @@ function lt_restore_excluded_words_in_html($text, $placeholders) {
     return $text;
 }
 
-// Perform translation with LibreTranslate and cache it
+// Perform translation with freedomTranslate and cache it
 function lt_translate($text, $source, $target, $format = 'text') {
     if (!function_exists('wp_remote_post')) return $text;
     if (trim($text) === '' || $source === $target || !lt_is_language_enabled($target)) return $text;
@@ -187,9 +187,9 @@ function lt_filter_post_content($content) {
     $site_lang = substr(get_locale(), 0, 2);
 
     $placeholder = '<lt-selector></lt-selector>';
-    $content = str_replace('[libretranslate_selector]', $placeholder, $content);
+    $content = str_replace('[freedomtranslate_selector]', $placeholder, $content);
     $translated = lt_translate($content, $site_lang, $user_lang, 'html');
-    $translated = str_replace($placeholder, '[libretranslate_selector]', $translated);
+    $translated = str_replace($placeholder, '[freedomtranslate_selector]', $translated);
 
     return do_shortcode($translated);
 }
@@ -221,7 +221,7 @@ add_filter('gettext', 'lt_filter_gettext', 20, 3);
 
 // Admin settings page
 function lt_admin_menu() {
-    add_options_page('LibreTranslate', 'LibreTranslate', 'manage_options', 'libretranslate', 'lt_admin_page');
+    add_options_page('FreedomTranslate', 'FreedomTranslate', 'manage_options', 'freedomtranslate', 'lt_admin_page');
 }
 add_action('admin_menu', 'lt_admin_menu');
 
@@ -250,7 +250,7 @@ function lt_admin_page() {
     $excluded_words = get_option(LT_WORDS_EXCLUDE_OPTION, []);
     ?>
     <div class="wrap">
-        <h2>LibreTranslate Settings</h2>
+        <h2>FreedomTranslate Settings</h2>
         <form method="post">
             <h3>Enabled Languages</h3>
             <select multiple name="lt_languages[]" style="height:200px; width:250px;">
@@ -273,11 +273,11 @@ function lt_admin_page() {
 		
 		<hr />
 <form method="post">
-    <h3>LibreTranslate API URL</h3>
+    <h3>FreedomTranslate API URL</h3>
     <input type="text" name="lt_api_url" style="width: 400px;" value="<?php echo esc_attr(get_option(LT_API_URL_OPTION, LT_API_URL_DEFAULT)); ?>" />
     <p><input type="submit" name="lt_save_api_url" class="button button-primary" value="Save API URL" /></p>
 <hr />
-<h3>LibreTranslate API Key (optional)</h3>
+<h3>FreedomTranslate API Key (optional)</h3>
 <input type="text" name="lt_api_key" style="width: 400px;" value="<?php echo esc_attr(get_option(LT_API_KEY_OPTION, '')) ?>" />
 <p><input type="submit" name="lt_save_api_key" class="button button-primary" value="Save API Key" /></p>
 
@@ -309,7 +309,7 @@ if (isset($_POST['lt_save_api_key'])) {
 
 // Add checkbox to post edit screen to exclude page/post
 add_action('add_meta_boxes', function() {
-    add_meta_box('lt_exclude_meta', 'LibreTranslate', function($post) {
+    add_meta_box('lt_exclude_meta', 'FreedomTranslate', function($post) {
         $value = get_post_meta($post->ID, '_lt_exclude', true);
         ?>
         <label><input type="checkbox" name="lt_exclude" value="1" <?php checked($value, '1'); ?> />
