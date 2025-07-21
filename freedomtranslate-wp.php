@@ -11,43 +11,43 @@ Plugin URI: https://github.com/OskarCosimo/FreedomTranslate-WP
 
 if (!defined('ABSPATH')) exit; // Block direct access
 
-// Prefix: freewp_
+// Prefix: freedomtranslate_
 
-define('FREEWP_CACHE_PREFIX', 'freewp_cache_');
-define('FREEWP_WORDS_EXCLUDE_OPTION', 'freewp_exclude_words');
-define('FREEWP_LANGUAGES_OPTION', 'freewp_enabled_languages');
-define('FREEWP_API_URL_OPTION', 'freewp_api_url');
-define('FREEWP_API_KEY_OPTION', 'freewp_api_key');
-define('FREEWP_API_URL_DEFAULT', 'http://localhost:5000/translate');
+define('FREEDOMTRANSLATE_CACHE_PREFIX', 'freedomtranslate_cache_');
+define('FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION', 'freedomtranslate_exclude_words');
+define('FREEDOMTRANSLATE_LANGUAGES_OPTION', 'freedomtranslate_enabled_languages');
+define('FREEDOMTRANSLATE_API_URL_OPTION', 'freedomtranslate_api_url');
+define('FREEDOMTRANSLATE_API_KEY_OPTION', 'freedomtranslate_api_key');
+define('FREEDOMTRANSLATE_API_URL_DEFAULT', 'http://localhost:5000/translate');
 
 /**
  * Check if a target language is enabled
  */
-function freewp_is_language_enabled($lang_code) {
-    $enabled = get_option(FREEWP_LANGUAGES_OPTION, []);
+function freedomtranslate_is_language_enabled($lang_code) {
+    $enabled = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
     return in_array($lang_code, $enabled, true);
 }
 
 /**
  * Get user language from sanitized GET, COOKIE, or browser header
  */
-function freewp_get_user_lang() {
-    if (isset($_GET['freewp_lang'])) {
-        $lang = sanitize_text_field($_GET['freewp_lang']);
-        $enabled = get_option(FREEWP_LANGUAGES_OPTION, []);
+function freedomtranslate_get_user_lang() {
+    if (isset($_GET['freedomtranslate_lang'])) {
+        $lang = sanitize_text_field($_GET['freedomtranslate_lang']);
+        $enabled = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
         if (in_array($lang, $enabled, true)) {
             return $lang;
         }
-    } elseif (isset($_COOKIE['freewp_lang'])) {
-        $lang = sanitize_text_field($_COOKIE['freewp_lang']);
-        $enabled = get_option(FREEWP_LANGUAGES_OPTION, []);
+    } elseif (isset($_COOKIE['freedomtranslate_lang'])) {
+        $lang = sanitize_text_field($_COOKIE['freedomtranslate_lang']);
+        $enabled = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
         if (in_array($lang, $enabled, true)) {
             return $lang;
         }
     }
 
     $browser_lang = isset($_SERVER['HTTP_ACCEPT_LANGUAGE']) ? substr(sanitize_text_field($_SERVER['HTTP_ACCEPT_LANGUAGE']), 0, 2) : 'en';
-    $enabled = get_option(FREEWP_LANGUAGES_OPTION, []);
+    $enabled = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
     return in_array($browser_lang, $enabled, true) ? $browser_lang : 'en';
 }
 
@@ -55,12 +55,12 @@ function freewp_get_user_lang() {
  * Set language cookie on init hook securely
  */
 add_action('init', function() {
-    if (isset($_GET['freewp_lang'])) {
-        $lang = sanitize_text_field($_GET['freewp_lang']);
-        $enabled = get_option(FREEWP_LANGUAGES_OPTION, []);
+    if (isset($_GET['freedomtranslate_lang'])) {
+        $lang = sanitize_text_field($_GET['freedomtranslate_lang']);
+        $enabled = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
         if (in_array($lang, $enabled, true)) {
-            setcookie('freewp_lang', $lang, time() + 3600 * 24 * 30, COOKIEPATH, COOKIE_DOMAIN, is_ssl(), true);
-            $_COOKIE['freewp_lang'] = $lang;
+            setcookie('freedomtranslate_lang', $lang, time() + 3600 * 24 * 30, COOKIEPATH, COOKIE_DOMAIN, is_ssl(), true);
+            $_COOKIE['freedomtranslate_lang'] = $lang;
         }
     }
 });
@@ -68,7 +68,7 @@ add_action('init', function() {
 /**
  * List all supported languages
  */
-function freewp_get_all_languages() {
+function freedomtranslate_get_all_languages() {
     return [
         'ar' => 'Arabic','az' => 'Azerbaijani','zh' => 'Chinese','cs' => 'Czech','da' => 'Danish','nl' => 'Dutch','en' => 'English',
         'fi' => 'Finnish','fr' => 'Français','de' => 'Deutsch','el' => 'Greek','he' => 'Hebrew','hi' => 'Hindi','hu' => 'Hungarian',
@@ -81,12 +81,12 @@ function freewp_get_all_languages() {
 /**
  * Language selector shortcode
  */
-function freewp_language_selector_shortcode() {
-    $all_languages = freewp_get_all_languages();
-    $enabled_languages = get_option(FREEWP_LANGUAGES_OPTION, array_keys($all_languages));
-    $current = freewp_get_user_lang();
+function freedomtranslate_language_selector_shortcode() {
+    $all_languages = freedomtranslate_get_all_languages();
+    $enabled_languages = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, array_keys($all_languages));
+    $current = freedomtranslate_get_user_lang();
 
-    $html = '<form method="get" id="freewp_lang_form"><select name="freewp_lang" onchange="this.form.submit()">';
+    $html = '<form method="get" id="freedomtranslate_lang_form"><select name="freedomtranslate_lang" onchange="this.form.submit()">';
     foreach ($all_languages as $code => $label) {
         if (!in_array($code, $enabled_languages, true)) continue;
         $selected = ($code === $current) ? 'selected' : '';
@@ -95,12 +95,12 @@ function freewp_language_selector_shortcode() {
     $html .= '</select></form>';
     return $html;
 }
-add_shortcode('freewp_selector', 'freewp_language_selector_shortcode');
+add_shortcode('freedomtranslate_selector', 'freedomtranslate_language_selector_shortcode');
 
 /**
  * Protect excluded words inside HTML text nodes replacing them with placeholders
  */
-function freewp_protect_excluded_words_in_html($html, $excluded_words) {
+function freedomtranslate_protect_excluded_words_in_html($html, $excluded_words) {
     $dom = new DOMDocument();
     libxml_use_internal_errors(true);
     $dom->loadHTML(mb_convert_encoding($html, 'HTML-ENTITIES', 'UTF-8'));
@@ -120,7 +120,7 @@ function freewp_protect_excluded_words_in_html($html, $excluded_words) {
             $pattern = '/(?<!\p{L})' . preg_quote($word, '/') . '(?!\p{L})/ui';
 
             if (preg_match($pattern, $text)) {
-                $placeholder = 'FREEWP_EXCL_' . substr(md5($word), 0, 8);
+                $placeholder = 'FREEDOMTRANSLATE_EXCL_' . substr(md5($word), 0, 8);
                 $text = preg_replace($pattern, $placeholder, $text);
                 $placeholders[$placeholder] = $word;
             }
@@ -137,7 +137,7 @@ function freewp_protect_excluded_words_in_html($html, $excluded_words) {
 /**
  * Restore excluded words from placeholders in translated text
  */
-function freewp_restore_excluded_words_in_html($text, $placeholders) {
+function freedomtranslate_restore_excluded_words_in_html($text, $placeholders) {
     foreach ($placeholders as $placeholder => $original_word) {
         $pattern = '/' . preg_quote($placeholder, '/') . '/i';
         $text = preg_replace($pattern, $original_word, $text);
@@ -148,32 +148,32 @@ function freewp_restore_excluded_words_in_html($text, $placeholders) {
 /**
  * Perform translation with LibreTranslate and cache it
  */
-function freewp_translate($text, $source, $target, $format = 'text') {
+function freedomtranslate_translate($text, $source, $target, $format = 'text') {
     if (!function_exists('wp_remote_post')) return $text;
-    if (trim($text) === '' || $source === $target || !freewp_is_language_enabled($target)) return $text;
+    if (trim($text) === '' || $source === $target || !freedomtranslate_is_language_enabled($target)) return $text;
 
-    $excluded_words = get_option(FREEWP_WORDS_EXCLUDE_OPTION, []);
+    $excluded_words = get_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, []);
 
     if ($format === 'html' && !empty($excluded_words)) {
-        list($text, $placeholders) = freewp_protect_excluded_words_in_html($text, $excluded_words);
+        list($text, $placeholders) = freedomtranslate_protect_excluded_words_in_html($text, $excluded_words);
     } else {
         $placeholders = [];
         foreach ($excluded_words as $word) {
             $word = trim($word);
             if ($word === '') continue;
-            $placeholder = 'FREEWP_EXCL_' . substr(md5($word), 0, 8);
+            $placeholder = 'FREEDOMTRANSLATE_EXCL_' . substr(md5($word), 0, 8);
             $pattern = '/\b' . preg_quote($word, '/') . '\b/ui';
             $text = preg_replace($pattern, $placeholder, $text);
             $placeholders[$placeholder] = $word;
         }
     }
 
-    $cache_key = FREEWP_CACHE_PREFIX . md5($text . $source . $target . $format);
+    $cache_key = FREEDOMTRANSLATE_CACHE_PREFIX . md5($text . $source . $target . $format);
     $cached = get_option($cache_key, false);
     if ($cached !== false) return $cached;
 
-    $api_url = get_option(FREEWP_API_URL_OPTION, FREEWP_API_URL_DEFAULT);
-    $api_key = get_option(FREEWP_API_KEY_OPTION, '');
+    $api_url = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
+    $api_key = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
 
     $body = [
         'q' => $text,
@@ -199,7 +199,7 @@ function freewp_translate($text, $source, $target, $format = 'text') {
     $translated = $json['translatedText'];
 
     if (!empty($placeholders)) {
-        $translated = freewp_restore_excluded_words_in_html($translated, $placeholders);
+        $translated = freedomtranslate_restore_excluded_words_in_html($translated, $placeholders);
     }
 
     update_option($cache_key, $translated);
@@ -209,98 +209,98 @@ function freewp_translate($text, $source, $target, $format = 'text') {
 /**
  * Translate post content filter
  */
-function freewp_filter_post_content($content) {
+function freedomtranslate_filter_post_content($content) {
     if (is_admin()) return $content;
     global $post;
-    if ($post && get_post_meta($post->ID, '_freewp_exclude', true) === '1') return $content;
+    if ($post && get_post_meta($post->ID, '_freedomtranslate_exclude', true) === '1') return $content;
 
-    $user_lang = freewp_get_user_lang();
+    $user_lang = freedomtranslate_get_user_lang();
     $site_lang = substr(get_locale(), 0, 2);
 
-    $placeholder = '<freewp-selector></freewp-selector>';
-    $content = str_replace('[freewp_selector]', $placeholder, $content);
-    $translated = freewp_translate($content, $site_lang, $user_lang, 'html');
-    $translated = str_replace($placeholder, '[freewp_selector]', $translated);
+    $placeholder = '<freedomtranslate-selector></freedomtranslate-selector>';
+    $content = str_replace('[freedomtranslate_selector]', $placeholder, $content);
+    $translated = freedomtranslate_translate($content, $site_lang, $user_lang, 'html');
+    $translated = str_replace($placeholder, '[freedomtranslate_selector]', $translated);
 
     return do_shortcode($translated);
 }
-add_filter('the_content', 'freewp_filter_post_content');
+add_filter('the_content', 'freedomtranslate_filter_post_content');
 
 /**
  * Translate post title filter
  */
-function freewp_filter_post_title($title) {
+function freedomtranslate_filter_post_title($title) {
     if (is_admin()) return $title;
-    $user_lang = freewp_get_user_lang();
+    $user_lang = freedomtranslate_get_user_lang();
     $site_lang = substr(get_locale(), 0, 2);
-    return freewp_translate($title, $site_lang, $user_lang);
+    return freedomtranslate_translate($title, $site_lang, $user_lang);
 }
-add_filter('the_title', 'freewp_filter_post_title');
+add_filter('the_title', 'freedomtranslate_filter_post_title');
 
 /**
  * Translate gettext strings filter
  */
-if (!function_exists('freewp_filter_gettext')) {
-    function freewp_filter_gettext($translated_text, $text, $domain) {
+if (!function_exists('freedomtranslate_filter_gettext')) {
+    function freedomtranslate_filter_gettext($translated_text, $text, $domain) {
         if (is_admin()) return $translated_text;
         $blocked_domains = ['zstore-manager-basic', 'woocommerce', 'default'];
         if (in_array($domain, $blocked_domains, true)) return $translated_text;
         if (preg_match('/%[\d\$\.\-\+]*[bcdeEfFgGosuxX]/', $translated_text)) return $translated_text;
 
-        $user_lang = freewp_get_user_lang();
+        $user_lang = freedomtranslate_get_user_lang();
         $site_lang = substr(get_locale(), 0, 2);
-        return freewp_translate($translated_text, $site_lang, $user_lang);
+        return freedomtranslate_translate($translated_text, $site_lang, $user_lang);
     }
 }
-add_filter('gettext', 'freewp_filter_gettext', 20, 3);
+add_filter('gettext', 'freedomtranslate_filter_gettext', 20, 3);
 
 /**
  * Add admin menu page
  */
-function freewp_admin_menu() {
-    add_options_page('FreedomTranslate', 'FreedomTranslate', 'manage_options', 'freewp_freedomtranslate', 'freewp_admin_page');
+function freedomtranslate_admin_menu() {
+    add_options_page('FreedomTranslate', 'FreedomTranslate', 'manage_options', 'freedomtranslate_freedomtranslate', 'freedomtranslate_admin_page');
 }
-add_action('admin_menu', 'freewp_admin_menu');
+add_action('admin_menu', 'freedomtranslate_admin_menu');
 
 /**
  * Admin page callback with sanitization, validation and nonce check
  */
-function freewp_admin_page() {
+function freedomtranslate_admin_page() {
     if (!current_user_can('manage_options')) {
         wp_die(__('You do not have sufficient permissions to access this page.'));
     }
 
-    if (isset($_POST['_wpnonce']) && !wp_verify_nonce($_POST['_wpnonce'], 'freewp_admin_save')) {
+    if (isset($_POST['_wpnonce']) && !wp_verify_nonce($_POST['_wpnonce'], 'freedomtranslate_admin_save')) {
         echo '<div class="error"><p>Security check failed. Please try again.</p></div>';
     } else {
         // Clear cache
-        if (isset($_POST['freewp_clear_cache'])) {
+        if (isset($_POST['freedomtranslate_clear_cache'])) {
             global $wpdb;
-            $wpdb->query("DELETE FROM $wpdb->options WHERE option_name LIKE '" . esc_sql(FREEWP_CACHE_PREFIX) . "%'");
+            $wpdb->query("DELETE FROM $wpdb->options WHERE option_name LIKE '" . esc_sql(FREEDOMTRANSLATE_CACHE_PREFIX) . "%'");
             echo '<div class="updated"><p>Cache purged.</p></div>';
         }
 
         // Save enabled languages
-        if (isset($_POST['freewp_save_languages'], $_POST['freewp_languages']) && is_array($_POST['freewp_languages'])) {
-            $languages = array_map('sanitize_text_field', $_POST['freewp_languages']);
-            update_option(FREEWP_LANGUAGES_OPTION, $languages);
+        if (isset($_POST['freedomtranslate_save_languages'], $_POST['freedomtranslate_languages']) && is_array($_POST['freedomtranslate_languages'])) {
+            $languages = array_map('sanitize_text_field', $_POST['freedomtranslate_languages']);
+            update_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, $languages);
             echo '<div class="updated"><p>Languages saved.</p></div>';
         }
 
         // Save excluded words
-        if (isset($_POST['freewp_save_excluded_words'], $_POST['freewp_excluded_words'])) {
-            $words_raw = sanitize_textarea_field($_POST['freewp_excluded_words']);
+        if (isset($_POST['freedomtranslate_save_excluded_words'], $_POST['freedomtranslate_excluded_words'])) {
+            $words_raw = sanitize_textarea_field($_POST['freedomtranslate_excluded_words']);
             $words = preg_split("/\r\n|\n|\r/", $words_raw);
             $words = array_map('trim', array_filter($words));
-            update_option(FREEWP_WORDS_EXCLUDE_OPTION, $words);
+            update_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, $words);
             echo '<div class="updated"><p>Excluded words saved.</p></div>';
         }
 
         // Save API URL
-        if (isset($_POST['freewp_save_api_url'], $_POST['freewp_api_url'])) {
-            $url = trim(sanitize_text_field($_POST['freewp_api_url']));
+        if (isset($_POST['freedomtranslate_save_api_url'], $_POST['freedomtranslate_api_url'])) {
+            $url = trim(sanitize_text_field($_POST['freedomtranslate_api_url']));
             if (filter_var($url, FILTER_VALIDATE_URL) && preg_match('/^https?:\/\//', $url)) {
-                update_option(FREEWP_API_URL_OPTION, esc_url_raw($url));
+                update_option(FREEDOMTRANSLATE_API_URL_OPTION, esc_url_raw($url));
                 echo '<div class="updated"><p>API URL saved.</p></div>';
             } else {
                 echo '<div class="error"><p>Invalid API URL. Please enter a valid http or https URL.</p></div>';
@@ -308,29 +308,29 @@ function freewp_admin_page() {
         }
 
         // Save API key
-        if (isset($_POST['freewp_save_api_key'], $_POST['freewp_api_key'])) {
-            $key = sanitize_text_field($_POST['freewp_api_key']);
-            update_option(FREEWP_API_KEY_OPTION, $key);
+        if (isset($_POST['freedomtranslate_save_api_key'], $_POST['freedomtranslate_api_key'])) {
+            $key = sanitize_text_field($_POST['freedomtranslate_api_key']);
+            update_option(FREEDOMTRANSLATE_API_KEY_OPTION, $key);
             echo '<div class="updated"><p>API Key saved.</p></div>';
         }
     }
 
     // Fetch current settings for form
-    $all_languages = freewp_get_all_languages();
-    $enabled_languages = get_option(FREEWP_LANGUAGES_OPTION, array_keys($all_languages));
-    $excluded_words = get_option(FREEWP_WORDS_EXCLUDE_OPTION, []);
-    $api_url = get_option(FREEWP_API_URL_OPTION, FREEWP_API_URL_DEFAULT);
-    $api_key = get_option(FREEWP_API_KEY_OPTION, '');
+    $all_languages = freedomtranslate_get_all_languages();
+    $enabled_languages = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, array_keys($all_languages));
+    $excluded_words = get_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, []);
+    $api_url = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
+    $api_key = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
 
     ?>
     <div class="wrap">
         <h2>FreedomTranslate Settings</h2>
 
         <form method="post" action="">
-            <?php wp_nonce_field('freewp_admin_save'); ?>
+            <?php wp_nonce_field('freedomtranslate_admin_save'); ?>
 
             <h3>Enabled Languages</h3>
-            <select multiple name="freewp_languages[]" style="height:200px; width:250px;">
+            <select multiple name="freedomtranslate_languages[]" style="height:200px; width:250px;">
                 <?php foreach ($all_languages as $code => $label): ?>
                     <option value="<?php echo esc_attr($code); ?>" <?php selected(in_array($code, $enabled_languages, true)); ?>>
                         <?php echo esc_html($label); ?>
@@ -338,42 +338,42 @@ function freewp_admin_page() {
                 <?php endforeach; ?>
             </select>
             <p><em>Hold CTRL (Windows) or CMD (Mac) to select multiple.</em></p>
-            <p><input type="submit" name="freewp_save_languages" class="button button-primary" value="Save Languages" /></p>
+            <p><input type="submit" name="freedomtranslate_save_languages" class="button button-primary" value="Save Languages" /></p>
         </form>
 
         <hr />
 
         <form method="post" action="">
-            <?php wp_nonce_field('freewp_admin_save'); ?>
+            <?php wp_nonce_field('freedomtranslate_admin_save'); ?>
 
             <h3>Excluded Words</h3>
             <p>(separate words by new row)</p>
-            <textarea name="freewp_excluded_words" style="width:300px; height:150px;"><?php echo esc_textarea(implode("\n", $excluded_words)); ?></textarea>
-            <p><input type="submit" name="freewp_save_excluded_words" class="button button-primary" value="Save Exclusions" /></p>
+            <textarea name="freedomtranslate_excluded_words" style="width:300px; height:150px;"><?php echo esc_textarea(implode("\n", $excluded_words)); ?></textarea>
+            <p><input type="submit" name="freedomtranslate_save_excluded_words" class="button button-primary" value="Save Exclusions" /></p>
         </form>
 
         <hr />
 
         <form method="post" action="">
-            <?php wp_nonce_field('freewp_admin_save'); ?>
+            <?php wp_nonce_field('freedomtranslate_admin_save'); ?>
 
             <h3>FreedomTranslate API URL</h3>
-            <input type="text" name="freewp_api_url" style="width: 400px;" value="<?php echo esc_attr($api_url); ?>" />
-            <p><input type="submit" name="freewp_save_api_url" class="button button-primary" value="Save API URL" /></p>
+            <input type="text" name="freedomtranslate_api_url" style="width: 400px;" value="<?php echo esc_attr($api_url); ?>" />
+            <p><input type="submit" name="freedomtranslate_save_api_url" class="button button-primary" value="Save API URL" /></p>
 
             <hr />
 
             <h3>FreedomTranslate API Key (optional)</h3>
-            <input type="text" name="freewp_api_key" style="width: 400px;" value="<?php echo esc_attr($api_key); ?>" />
-            <p><input type="submit" name="freewp_save_api_key" class="button button-primary" value="Save API Key" /></p>
+            <input type="text" name="freedomtranslate_api_key" style="width: 400px;" value="<?php echo esc_attr($api_key); ?>" />
+            <p><input type="submit" name="freedomtranslate_save_api_key" class="button button-primary" value="Save API Key" /></p>
         </form>
 
         <hr />
 
         <h3>Translation Cache</h3>
         <form method="post" action="">
-            <?php wp_nonce_field('freewp_admin_save'); ?>
-            <input type="submit" name="freewp_clear_cache" class="button button-secondary" value="Clear Translation Cache" />
+            <?php wp_nonce_field('freedomtranslate_admin_save'); ?>
+            <input type="submit" name="freedomtranslate_clear_cache" class="button button-secondary" value="Clear Translation Cache" />
         </form>
 
     </div>
@@ -384,11 +384,11 @@ function freewp_admin_page() {
  * Add checkbox meta box on post/page editor to exclude translation
  */
 add_action('add_meta_boxes', function() {
-    add_meta_box('freewp_exclude_meta', 'FreedomTranslate', function($post) {
-        $value = get_post_meta($post->ID, '_freewp_exclude', true);
+    add_meta_box('freedomtranslate_exclude_meta', 'FreedomTranslate', function($post) {
+        $value = get_post_meta($post->ID, '_freedomtranslate_exclude', true);
         ?>
         <label>
-            <input type="checkbox" name="freewp_exclude" value="1" <?php checked($value, '1'); ?> />
+            <input type="checkbox" name="freedomtranslate_exclude" value="1" <?php checked($value, '1'); ?> />
             <?php echo esc_html__('Exclude this page/post from the automatic translation', 'freedomtranslate'); ?>
         </label>
         <?php
@@ -402,10 +402,10 @@ add_action('save_post', function($post_id) {
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
     if (!current_user_can('edit_post', $post_id)) return;
 
-    if (isset($_POST['freewp_exclude'])) {
-        update_post_meta($post_id, '_freewp_exclude', '1');
+    if (isset($_POST['freedomtranslate_exclude'])) {
+        update_post_meta($post_id, '_freedomtranslate_exclude', '1');
     } else {
-        delete_post_meta($post_id, '_freewp_exclude');
+        delete_post_meta($post_id, '_freedomtranslate_exclude');
     }
 });
 ?>
