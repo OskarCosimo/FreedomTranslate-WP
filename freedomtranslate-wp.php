@@ -6,7 +6,7 @@ Version: 1.4.1
 Author: Freedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
-Plugin URI: https://github.com/tuo-utente/freedom-translate
+Plugin URI: https://github.com/OskarCosimo/FreedomTranslate-WP
 */
 
 if (!defined('ABSPATH')) exit; // Block direct access
