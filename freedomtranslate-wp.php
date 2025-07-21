@@ -271,7 +271,7 @@ add_action('admin_menu', 'freedomtranslate_admin_menu');
  */
 function freedomtranslate_admin_page() {
     if (!current_user_can('manage_options')) {
-        wp_die(__('You do not have sufficient permissions to access this page.', 'freedomtranslate-wp'));
+        wp_die(esc_html(__('You do not have sufficient permissions to access this page.', 'freedomtranslate-wp')));
     }
 
     if (isset($_POST['_wpnonce']) && !wp_verify_nonce($_POST['_wpnonce'], 'freedomtranslate_admin_save')) {
