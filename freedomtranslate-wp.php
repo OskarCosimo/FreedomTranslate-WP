@@ -271,7 +271,7 @@ add_action('admin_menu', 'freedomtranslate_admin_menu');
  */
 function freedomtranslate_admin_page() {
     if (!current_user_can('manage_options')) {
-        wp_die(__('You do not have sufficient permissions to access this page.'));
+        wp_die(__('You do not have sufficient permissions to access this page.', 'freedomtranslate-wp'));
     }
 
     if (isset($_POST['_wpnonce']) && !wp_verify_nonce($_POST['_wpnonce'], 'freedomtranslate_admin_save')) {
@@ -393,7 +393,7 @@ add_action('add_meta_boxes', function() {
         ?>
         <label>
             <input type="checkbox" name="freedomtranslate_exclude" value="1" <?php checked($value, '1'); ?> />
-            <?php echo esc_html__('Exclude this page/post from the automatic translation', 'freedomtranslate'); ?>
+            <?php echo esc_html__('Exclude this page/post from the automatic translation', 'freedomtranslate-wp'); ?>
         </label>
         <?php
     }, ['post', 'page'], 'side');
