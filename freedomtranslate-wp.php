@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with LibreTranslate (localhost:5000) or remote URL with API + cache and language selection
-Version: 1.4.2
+Version: 1.4.3
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -113,7 +113,7 @@ function freedomtranslate_protect_excluded_words_in_html($html, $excluded_words)
             $pattern = '/(?<!\p{L})' . preg_quote($word, '/') . '(?!\p{L})/ui';
 
             if (preg_match($pattern, $text)) {
-                $placeholder = '123' . substr(md5($word), 0, 8) . '123';
+                $placeholder = $placeholder = '[PH_' . strtoupper(substr(md5($word), 0, 8)) . ']';
                 $text = preg_replace($pattern, $placeholder, $text);
                 $placeholders[$placeholder] = $word;
             }
@@ -155,7 +155,7 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text') {
         foreach ($excluded_words as $word) {
             $word = trim($word);
             if ($word === '') continue;
-            $placeholder = '123' . substr(md5($word), 0, 8) . '123';
+            $placeholder = $placeholder = '[PH_' . strtoupper(substr(md5($word), 0, 8)) . ']';
             $pattern = '/\b' . preg_quote($word, '/') . '\b/ui';
             $text = preg_replace($pattern, $placeholder, $text);
             $placeholders[$placeholder] = $word;
