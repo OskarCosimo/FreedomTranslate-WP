@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with LibreTranslate (localhost:5000) or remote URL with API + cache and language selection
-Version: 1.4.1
+Version: 1.4.2
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -113,7 +113,7 @@ function freedomtranslate_protect_excluded_words_in_html($html, $excluded_words)
             $pattern = '/(?<!\p{L})' . preg_quote($word, '/') . '(?!\p{L})/ui';
 
             if (preg_match($pattern, $text)) {
-                $placeholder = substr(md5($word), 0, 8);
+                $placeholder = '123' . substr(md5($word), 0, 8) . '123';
                 $text = preg_replace($pattern, $placeholder, $text);
                 $placeholders[$placeholder] = $word;
             }
@@ -155,7 +155,7 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text') {
         foreach ($excluded_words as $word) {
             $word = trim($word);
             if ($word === '') continue;
-            $placeholder = substr(md5($word), 0, 8);
+            $placeholder = '123' . substr(md5($word), 0, 8) . '123';
             $pattern = '/\b' . preg_quote($word, '/') . '\b/ui';
             $text = preg_replace($pattern, $placeholder, $text);
             $placeholders[$placeholder] = $word;
@@ -319,7 +319,7 @@ function freedomtranslate_admin_page(){
         update_option(FREEDOMTRANSLATE_API_KEY_OPTION, $key);
         echo '<div class="updated"><p>'.esc_html__('API Key saved.', 'freedomtranslate-wp').'</p></div>';
     }
-
+}
     $all = freedomtranslate_get_all_languages();
     $enabled = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, array_keys($all));
     $excluded = get_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, []);
@@ -385,6 +385,7 @@ echo '<p><input type="submit" name="freedomtranslate_save_languages" class="butt
     echo '<input type="submit" name="freedomtranslate_clear_cache" class="button button-secondary" value="' . esc_attr__('Clear Translation Cache', 'freedomtranslate-wp') . '" />';
     echo '</form></div>';
 }
+
 
 //-- META BOX --//
 add_action('add_meta_boxes', function(){
