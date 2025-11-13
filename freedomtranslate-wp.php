@@ -244,42 +244,6 @@ function freedomtranslate_language_selector_shortcode() {
 add_shortcode('freedomtranslate_selector', 'freedomtranslate_language_selector_shortcode');
 
 /**
- * Translate using Google Translate free unofficial method
- * Note: This method uses an unofficial API endpoint that may be rate-limited
- * 
- * @param string $text Text to translate
- * @param string $source Source language code
- * @param string $target Target language code
- * @return string Translated text or original text if translation fails
- */
-function freedomtranslate_translate_google_free($text, $source, $target) {
-    $url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=" 
-        . urlencode($source) . "&tl=" . urlencode($target) . "&dt=t&q=" . urlencode($text);
-    
-    $response = wp_remote_get($url, ['timeout' => 120]);
-    
-    if (is_wp_error($response)) {
-        return $text;
-    }
-    
-    $body = wp_remote_retrieve_body($response);
-    $json = json_decode($body, true);
-    
-    if (!isset($json) || !is_array($json)) {
-        return $text;
-    }
-    
-    $translated = '';
-    foreach ($json as $sentence) {
-        if (isset($sentence)) {
-            $translated .= $sentence;
-        }
-    }
-    
-    return !empty($translated) ? $translated : $text;
-}
-
-/**
  * Translate using Google Cloud Translation API (official, paid)
  * Requires valid API key from Google Cloud Console
  * 
@@ -470,9 +434,9 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text') {
     
     // Select translation service
     switch ($service) {
-        case 'google_free':
-            $translated = freedomtranslate_translate_google_free($text, $source, $target);
-            break;
+        case 'googlehash':
+    $translated = $text;
+    break;
         case 'google_official':
             $translated = freedomtranslate_translate_google_official($text, $source, $target, $format);
             break;
@@ -674,13 +638,10 @@ function freedomtranslate_settings_page() {
                             </p>
                             
                             <label style="display: block; margin-bottom: 10px;">
-                                <input type="radio" name="translation_service" value="google_free" 
-                                    <?php checked($current_service, 'google_free'); ?>>
-                                <strong>Google Translate (Free - Unofficial)</strong>
-                            </label>
-                            <p class="description" style="margin-left: 24px; margin-bottom: 15px;">
-                                Uses unofficial Google Translate API endpoint. Free but unofficial and may be inaccurate.
-                            </p>
+                                <input type="radio" name="translation_service" value="googlehash" <?php checked($current_service, 'googlehash'); ?>>
+<strong>Google Translate Official</strong>
+</label>
+<p class="description" style="margin-left: 24px; margin-bottom: 15px;">Use official Google Translate page translation by adding #googtrans hash to URL (no API key needed).</p>
                             
                             <label style="display: block; margin-bottom: 10px;">
                                 <input type="radio" name="translation_service" value="google_official" 
@@ -911,4 +872,36 @@ add_action('save_post', function($post_id) {
     } else {
         delete_post_meta($post_id, '_freedomtranslate_exclude');
     }
+});
+
+add_action('wp_footer', function() {
+  $current_service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'freedomtranslate_service');
+  if ($current_service === 'googlehash') {
+    ?>
+    <div id="google_translate_element" style="display:none;"></div>
+    <script type="text/javascript">
+      function googleTranslateElementInit() {
+        new google.translate.TranslateElement({pageLanguage: 'en'}, 'google_translate_element');
+      }
+    </script>
+    <script type="text/javascript" src="//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit"></script>
+    <script type="text/javascript">
+      document.addEventListener('DOMContentLoaded', function() {
+        var langSelector = document.querySelector('select[name="freedomtranslate_lang"]');
+        if (!langSelector) return;
+
+        langSelector.addEventListener('change', function(event) {
+          event.preventDefault();
+          var selectedLang = this.value;
+          var sourceLang = 'en';
+
+          var baseUrl = window.location.href.split('?')[0].split('#')[0];
+          var newUrl = baseUrl + '?freedomtranslate_lang=' + selectedLang + '#googtrans(' + sourceLang + '|' + selectedLang + ')';
+
+          window.location.href = newUrl;
+        });
+      });
+    </script>
+    <?php
+  }
 });
