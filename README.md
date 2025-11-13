@@ -33,7 +33,7 @@ Includes smart caching, multiple translation services, user language selection, 
 - 🌐 **Real-time translation** of all frontend content (titles, post content, home, etc.)
 - 🔄 **Multiple Translation Services**:
   - **LibreTranslate / MarianMT** - Self-hosted or public server (open-source)
-  - **Google Translate (Free)** - Unofficial API endpoint (no cost, may be rate-limited)
+  - **Google Translate (Free)** - Official Google Translator plugin (translate all page)
   - **Google Cloud Translation API** - Official paid service (~$20 per 1M characters)
 - 🎯 **Language Detection Modes**:
   - **Automatic** - Detects initial language from browser settings
@@ -123,7 +123,7 @@ Navigate to:
 Choose between:
 
 1. **LibreTranslate / MarianMT** - Configure API URL and optional API key
-2. **Google Translate (Free - Unofficial)** - No configuration needed (may be rate-limited)
+2. **Google Translate Plugin** - No configuration needed (translate all the page)
 3. **Google Cloud Translation API (Official - Paid)** - Enter your Google Cloud API key
 
 ### Language Detection Mode
@@ -182,7 +182,7 @@ To use the official Google Cloud Translation API (optional):
 ## Notes
 
 - **LibreTranslate**: Must be running and reachable at your configured URL (default: `http://localhost:5000/translate`)
-- **Google Free**: Uses unofficial endpoint, may be rate-limited or blocked by Google
+- **Google Free**: Official Google Translator plugin, it translate the whole page without any preprocessing words
 - **Google Official**: Requires billing account, most reliable and fastest option
 - Supports both `text` and `html` formats — this plugin uses HTML-aware mode for accurate frontend rendering
 - Translations are cached using WordPress options to improve performance
@@ -193,7 +193,7 @@ To use the official Google Cloud Translation API (optional):
 
 ## What's New in v1.4.4
 
-- ✨ Added Google Translate support (free unofficial + official paid API)
+- ✨ Added Google Translate support (free plugin + official paid API)
 - 🎯 Language detection modes: automatic (browser) or manual (admin-defined)
 - ⏳ Loading overlay with animated spinner during language changes
 - 🌍 All code comments and admin UI translated to English
