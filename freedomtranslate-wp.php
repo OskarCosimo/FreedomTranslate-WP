@@ -893,10 +893,9 @@ add_action('wp_footer', function() {
         langSelector.addEventListener('change', function(event) {
           event.preventDefault();
           var selectedLang = this.value;
-          var sourceLang = 'en';
 
           var baseUrl = window.location.href.split('?')[0].split('#')[0];
-          var newUrl = baseUrl + '?freedomtranslate_lang=' + selectedLang + '#googtrans(' + sourceLang + '|' + selectedLang + ')';
+          var newUrl = baseUrl + '?freedomtranslate_lang=' + selectedLang + '#googtrans(' + selectedLang + ')';
 
           window.location.href = newUrl;
         });
