@@ -463,30 +463,27 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text') {
  * @return string Translated content
  */
 function freedomtranslate_filter_post_content($content) {
-    if (is_admin()) return $content;
-    
-    global $post;
-    if ($post && get_post_meta($post->ID, '_freedomtranslate_exclude', true) === '1') {
-        return $content;
-    }
-    
-    $user_lang = freedomtranslate_get_user_lang();
-    $site_lang = substr(get_locale(), 0, 2);
-    
-    if ($user_lang === $site_lang || !freedomtranslate_is_language_enabled($user_lang)) {
-        return $content;
-    }
-    
-    // Protect shortcode placeholder
-    $placeholder = '<!--freedomtranslate-selector-->';
-    $content = str_replace('[freedomtranslate_selector]', $placeholder, $content);
-    
-    $translated = freedomtranslate_translate($content, $site_lang, $user_lang, 'html');
-    
-    // Restore shortcode
-    $translated = str_replace($placeholder, '[freedomtranslate_selector]', $translated);
-    
-    return do_shortcode($translated);
+if (is_admin()) return $content;
+
+global $post;
+if ($post && get_post_meta($post->ID, '_freedomtranslate_exclude', true) === '1') {
+    return $content;
+}
+
+$user_lang = freedomtranslate_get_user_lang();
+$site_lang = substr(get_locale(), 0, 2);
+
+if ($user_lang === $site_lang || !freedomtranslate_is_language_enabled($user_lang)) {
+    return $content;
+}
+
+// Execute shortcodes BEFORE translation
+$content = do_shortcode($content);
+
+// Now translate the rendered content
+$translated = freedomtranslate_translate($content, $site_lang, $user_lang, 'html');
+
+return $translated;
 }
 add_filter('the_content', 'freedomtranslate_filter_post_content');
 add_filter('the_title', 'freedomtranslate_filter_post_content');
