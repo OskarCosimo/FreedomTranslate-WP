@@ -21,7 +21,7 @@ Includes smart caching, multiple translation services, user language selection, 
 - [Supported Languages](#supported-languages)
 - [Google Cloud Setup](#google-cloud-setup)
 - [Notes](#notes)
-- [What's New in v2.2](#whats-new-in-v22)
+- [What's New](#whats-new)
 - [Author](#author)
 - [License](#license)
 - [Disclaimer](#disclaimer)
@@ -191,8 +191,10 @@ To use the official Google Cloud Translation API (optional):
 
 ---
 
-## What's New in v1.4.4
-
+## What's New
+v1.4.5
+- Fixed shortcodes placeholder
+v1.4.4
 - ✨ Added Google Translate support (free plugin + official paid API)
 - 🎯 Language detection modes: automatic (browser) or manual (admin-defined)
 - ⏳ Loading overlay with animated spinner during language changes
