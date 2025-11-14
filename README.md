@@ -194,6 +194,7 @@ To use the official Google Cloud Translation API (optional):
 ## What's New
 v1.4.5
 - Fixed shortcodes placeholder
+  
 v1.4.4
 - ✨ Added Google Translate support (free plugin + official paid API)
 - 🎯 Language detection modes: automatic (browser) or manual (admin-defined)
