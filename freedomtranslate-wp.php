@@ -599,23 +599,23 @@ function freedomtranslate_settings_page() {
     }
 }
     
-    // Handle cache purge
+        // Handle cache purge
     if ( isset( $_POST['freedomtranslate_purge_cache'] ) ) {
         check_admin_referer( 'freedomtranslate_purge_cache', 'freedomtranslate_nonce_cache' );
         global $wpdb;
 
         $prefix_esc = esc_sql( FREEDOMTRANSLATE_CACHE_PREFIX );
 
-        // Delete old-style cache entries saved directly in wp_options (legacy format)
-        $deleted_legacy = $wpdb->query(
+        // Delete legacy cache entries saved directly in wp_options (old format, pre-transient)
+        $wpdb->query(
             $wpdb->prepare(
                 "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s",
                 $prefix_esc . '%'
             )
         );
 
-        // Delete new-style transient cache entries (current format)
-        $deleted_transients = $wpdb->query(
+        // Delete transient entries (both value and timeout rows)
+        $wpdb->query(
             $wpdb->prepare(
                 "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s",
                 '_transient_' . $prefix_esc . '%',
@@ -623,12 +623,10 @@ function freedomtranslate_settings_page() {
             )
         );
 
-        $total = intval( $deleted_legacy ) + intval( $deleted_transients );
-
-        // Flush WordPress object cache (covers RAM, Redis, Memcached)
+        // Flush WordPress object cache (covers RAM, Redis, Memcached — any backend)
         wp_cache_flush();
 
-        echo '<div class="notice notice-success"><p>Translation cache cleared. Removed ' . $total . ' entries (' . intval( $deleted_legacy ) . ' legacy + ' . intval( $deleted_transients ) . ' transients).</p></div>';
+        echo '<div class="notice notice-success"><p>Translation cache cleared successfully.</p></div>';
     }
 
     // Handle enabled languages
