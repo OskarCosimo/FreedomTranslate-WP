@@ -505,9 +505,18 @@ function freedomtranslate_translate( $text, $source, $target, $format = 'text' )
         $translated = freedomtranslate_restore_excluded_words_in_html( $translated, $placeholders );
     }
 
-    // Save translation to transient cache with 60-day TTL
-    // After 60 days WordPress automatically removes the entry — no manual cleanup needed
-    set_transient( $cache_key, $translated, DAY_IN_SECONDS * 60 );
+    // Get custom TTL from current post meta, fallback to default 30 days
+    $ttl_days = 30;
+    $post_id  = get_the_ID();
+    if ( $post_id ) {
+        $custom_ttl = get_post_meta( $post_id, '_freedomtranslate_cache_ttl', true );
+        if ( $custom_ttl !== '' && $custom_ttl > 0 ) {
+            $ttl_days = (int) $custom_ttl;
+        }
+    }
+
+    // Save translation to transient cache with custom or default TTL
+    set_transient( $cache_key, $translated, DAY_IN_SECONDS * $ttl_days );
 
     return $translated;
 }
@@ -917,17 +926,31 @@ if (isset($_POST['freedomtranslate_save_api_url'])) {
 /**
  * Add meta box to post editor for excluding posts from translation
  */
-add_action('add_meta_boxes', function() {
+add_action( 'add_meta_boxes', function() {
     add_meta_box(
         'freedomtranslate_exclude_meta',
         'FreedomTranslate',
-        function($post) {
-            wp_nonce_field('freedomtranslate_metabox', 'freedomtranslate_meta_nonce');
-            $val = get_post_meta($post->ID, '_freedomtranslate_exclude', true);
-            echo '<label><input type="checkbox" name="freedomtranslate_exclude" value="1" ' . checked($val, '1', false) . '> ';
-            echo esc_html__('Exclude this page/post from automatic translation') . '</label>';
+        function( $post ) {
+            wp_nonce_field( 'freedomtranslate_metabox', 'freedomtranslate_meta_nonce' );
+
+            $exclude  = get_post_meta( $post->ID, '_freedomtranslate_exclude', true );
+            $ttl_days = get_post_meta( $post->ID, '_freedomtranslate_cache_ttl', true );
+
+            // Exclude checkbox
+            echo '<label>';
+            echo '<input type="checkbox" name="freedomtranslate_exclude" value="1" ' . checked( $exclude, '1', false ) . '>';
+            echo ' ' . esc_html__( 'Exclude this page/post from automatic translation' );
+            echo '</label>';
+
+            // Cache TTL field
+            echo '<p style="margin-top: 12px;">';
+            echo '<label for="freedomtranslate_cache_ttl"><strong>Cache duration (days):</strong></label><br>';
+            echo '<input type="number" id="freedomtranslate_cache_ttl" name="freedomtranslate_cache_ttl" ';
+            echo 'value="' . esc_attr( $ttl_days ) . '" min="1" max="365" style="width: 80px; margin-top: 6px;">';
+            echo '<p class="description" style="margin-top: 4px;">Leave empty to use default (30 days).</p>';
+            echo '</p>';
         },
-        ['post', 'page'],
+        [ 'post', 'page' ],
         'side'
     );
 });
@@ -935,16 +958,28 @@ add_action('add_meta_boxes', function() {
 /**
  * Save post meta for translation exclusion
  */
-add_action('save_post', function($post_id) {
-    if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
-    if (!isset($_POST['freedomtranslate_meta_nonce']) || 
-        !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['freedomtranslate_meta_nonce'])), 'freedomtranslate_metabox')) return;
-    if (!current_user_can('edit_post', $post_id)) return;
-    
-    if (isset($_POST['freedomtranslate_exclude'])) {
-        update_post_meta($post_id, '_freedomtranslate_exclude', '1');
+add_action( 'save_post', function( $post_id ) {
+    if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
+    if ( ! isset( $_POST['freedomtranslate_meta_nonce'] ) ||
+         ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['freedomtranslate_meta_nonce'] ) ), 'freedomtranslate_metabox' ) ) return;
+    if ( ! current_user_can( 'edit_post', $post_id ) ) return;
+
+    // Save exclude flag
+    if ( isset( $_POST['freedomtranslate_exclude'] ) ) {
+        update_post_meta( $post_id, '_freedomtranslate_exclude', '1' );
     } else {
-        delete_post_meta($post_id, '_freedomtranslate_exclude');
+        delete_post_meta( $post_id, '_freedomtranslate_exclude' );
+    }
+
+    // Save custom cache TTL
+    if ( isset( $_POST['freedomtranslate_cache_ttl'] ) && $_POST['freedomtranslate_cache_ttl'] !== '' ) {
+        $ttl = absint( $_POST['freedomtranslate_cache_ttl'] );
+        // Clamp between 1 and 365 days
+        $ttl = max( 1, min( 365, $ttl ) );
+        update_post_meta( $post_id, '_freedomtranslate_cache_ttl', $ttl );
+    } else {
+        // Empty = use default, remove custom value
+        delete_post_meta( $post_id, '_freedomtranslate_cache_ttl' );
     }
 });
 
@@ -984,33 +1019,51 @@ add_action( 'freedomtranslate_auto_purge', function() {
     wp_cache_flush();
 });
 
-add_action('wp_footer', function() {
-  $current_service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'freedomtranslate_service');
-  if ($current_service === 'googlehash') {
-    ?>
-    <div id="google_translate_element" style="display:none;"></div>
-    <script type="text/javascript">
-      function googleTranslateElementInit() {
-        new google.translate.TranslateElement({pageLanguage: 'en'}, 'google_translate_element');
-      }
-    </script>
-    <script type="text/javascript" src="//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit"></script>
-    <script type="text/javascript">
-      document.addEventListener('DOMContentLoaded', function() {
-        var langSelector = document.querySelector('select[name="freedomtranslate_lang"]');
-        if (!langSelector) return;
+add_action( 'wp_footer', function() {
+    $current_service = get_option( FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'freedomtranslate_service' );
 
-        langSelector.addEventListener('change', function(event) {
-          event.preventDefault();
-          var selectedLang = this.value;
+    if ( $current_service === 'googlehash' ) {
+        $user_lang = freedomtranslate_get_user_lang();
+        $site_lang = substr( get_locale(), 0, 2 );
+        ?>
+        <div id="google_translate_element" style="display:none;"></div>
+        <script type="text/javascript">
+            function googleTranslateElementInit() {
+                new google.translate.TranslateElement(
+                    { pageLanguage: '<?php echo esc_js( $site_lang ); ?>' },
+                    'google_translate_element'
+                );
+            }
+        </script>
+        <script type="text/javascript"
+            src="//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit">
+        </script>
+        <script type="text/javascript">
+        document.addEventListener('DOMContentLoaded', function() {
+            var userLang     = '<?php echo esc_js( $user_lang ); ?>';
+            var siteLang     = '<?php echo esc_js( $site_lang ); ?>';
+            var currentHash  = window.location.hash;
 
-          var baseUrl = window.location.href.split('?')[0].split('#')[0];
-          var newUrl = baseUrl + '?freedomtranslate_lang=' + selectedLang + '#googtrans(' + selectedLang + ')';
+            // If user lang differs from site lang and no #googtrans hash is present yet
+            if ( userLang !== siteLang && currentHash.indexOf('googtrans') === -1 ) {
+                // Set the hash and reload the page once to trigger Google Translate
+                // Use sessionStorage to prevent infinite reload loop
+                if ( ! sessionStorage.getItem('ft_google_redirected') ) {
+                    sessionStorage.setItem('ft_google_redirected', '1');
+                    window.location.hash = 'googtrans(' + siteLang + '|' + userLang + ')';
+                    window.location.reload();
+                }
+            }
 
-          window.location.href = newUrl;
+            // If user manually changes language via selector, reset the redirect flag
+            var selector = document.querySelector('select[name="freedomtranslate_lang"]');
+            if ( selector ) {
+                selector.addEventListener('change', function() {
+                    sessionStorage.removeItem('ft_google_redirected');
+                });
+            }
         });
-      });
-    </script>
-    <?php
-  }
+        </script>
+        <?php
+    }
 });
