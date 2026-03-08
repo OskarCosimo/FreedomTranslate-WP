@@ -445,66 +445,70 @@ function freedomtranslate_restore_excluded_words_in_html($text, $placeholders) {
 /**
  * Main translation function with service selection
  * Supports LibreTranslate, Google Translate (free), and Google Translate (official)
- * 
- * @param string $text Text to translate
+ * Uses transients for caching with automatic TTL expiration to prevent wp_options bloat
+ *
+ * @param string $text   Text to translate
  * @param string $source Source language code
  * @param string $target Target language code
  * @param string $format Format of text ('text' or 'html')
  * @return string Translated text
  */
-function freedomtranslate_translate($text, $source, $target, $format = 'text') {
-    if (!function_exists('wp_remote_post')) return $text;
-    if (trim($text) === '' || $source === $target || !freedomtranslate_is_language_enabled($target)) {
+function freedomtranslate_translate( $text, $source, $target, $format = 'text' ) {
+    if ( ! function_exists( 'wp_remote_post' ) ) return $text;
+    if ( trim( $text ) === '' || $source === $target || ! freedomtranslate_is_language_enabled( $target ) ) {
         return $text;
     }
-    
-    $excluded_words = get_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, []);
-    
+
+    $excluded_words = get_option( FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, [] );
+
     // Protect excluded words from translation
-    if ($format === 'html' && !empty($excluded_words)) {
-        list($text, $placeholders) = freedomtranslate_protect_excluded_words_in_html($text, $excluded_words);
+    if ( $format === 'html' && ! empty( $excluded_words ) ) {
+        list( $text, $placeholders ) = freedomtranslate_protect_excluded_words_in_html( $text, $excluded_words );
     } else {
         $placeholders = [];
-        foreach ($excluded_words as $word) {
-            $word = trim($word);
-            if ($word === '') continue;
-            $placeholder = '[PH_' . strtoupper(substr(md5($word), 0, 8)) . ']';
-            $pattern = '/\b' . preg_quote($word, '/') . '\b/ui';
-            $text = preg_replace($pattern, $placeholder, $text);
+        foreach ( $excluded_words as $word ) {
+            $word = trim( $word );
+            if ( $word === '' ) continue;
+            $placeholder              = 'FTPH' . strtoupper( substr( md5( $word ), 0, 8 ) ) . 'FTPH';
+            $pattern                  = '/(?<![a-zA-Z0-9_\-])' . preg_quote( $word, '/' ) . '(?![a-zA-Z0-9_\-])/ui';
+            $text                     = preg_replace( $pattern, $placeholder, $text );
             $placeholders[$placeholder] = $word;
         }
     }
-    
-    // Check cache
-    $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
-    $cache_key = FREEDOMTRANSLATE_CACHE_PREFIX . md5($text . $source . $target . $format . $service);
-    $cached = get_option($cache_key, false);
-    
-    if ($cached !== false) {
+
+    // Build unique cache key based on content + languages + format + service
+    $service   = get_option( FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate' );
+    $cache_key = FREEDOMTRANSLATE_CACHE_PREFIX . md5( $text . $source . $target . $format . $service );
+
+    // Check transient cache — returns instantly if translation already exists
+    $cached = get_transient( $cache_key );
+    if ( $cached !== false ) {
         return $cached;
     }
-    
-    // Select translation service
-    switch ($service) {
+
+    // Select translation service and perform translation
+    switch ( $service ) {
         case 'googlehash':
-    $translated = $text;
-    break;
+            $translated = $text;
+            break;
         case 'google_official':
-            $translated = freedomtranslate_translate_google_official($text, $source, $target, $format);
+            $translated = freedomtranslate_translate_google_official( $text, $source, $target, $format );
             break;
         case 'libretranslate':
         default:
-            $translated = freedomtranslate_translate_libre($text, $source, $target, $format);
+            $translated = freedomtranslate_translate_libre( $text, $source, $target, $format );
             break;
     }
-    
-    // Restore excluded words
-    if (!empty($placeholders)) {
-        $translated = freedomtranslate_restore_excluded_words_in_html($translated, $placeholders);
+
+    // Restore excluded words from placeholders
+    if ( ! empty( $placeholders ) ) {
+        $translated = freedomtranslate_restore_excluded_words_in_html( $translated, $placeholders );
     }
-    
-    // Save to cache
-    update_option($cache_key, $translated);
+
+    // Save translation to transient cache with 60-day TTL
+    // After 60 days WordPress automatically removes the entry — no manual cleanup needed
+    set_transient( $cache_key, $translated, DAY_IN_SECONDS * 60 );
+
     return $translated;
 }
 
@@ -596,20 +600,37 @@ function freedomtranslate_settings_page() {
 }
     
     // Handle cache purge
-    if (isset($_POST['freedomtranslate_purge_cache'])) {
-        check_admin_referer('freedomtranslate_purge_cache', 'freedomtranslate_nonce_cache');
+    if ( isset( $_POST['freedomtranslate_purge_cache'] ) ) {
+        check_admin_referer( 'freedomtranslate_purge_cache', 'freedomtranslate_nonce_cache' );
         global $wpdb;
-        $prefix_esc = esc_sql(FREEDOMTRANSLATE_CACHE_PREFIX);
-        $option_names = $wpdb->get_col($wpdb->prepare("SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s", $prefix_esc . '%'));
-        if (!empty($option_names)) {
-            foreach ($option_names as $option_name) {
-                delete_option($option_name);
-                wp_cache_delete($option_name, 'options');
-            }
-        }
-        echo '<div class="notice notice-success"><p>Translation cache cleared.</p></div>';
+
+        $prefix_esc = esc_sql( FREEDOMTRANSLATE_CACHE_PREFIX );
+
+        // Delete old-style cache entries saved directly in wp_options (legacy format)
+        $deleted_legacy = $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s",
+                $prefix_esc . '%'
+            )
+        );
+
+        // Delete new-style transient cache entries (current format)
+        $deleted_transients = $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s",
+                '_transient_' . $prefix_esc . '%',
+                '_transient_timeout_' . $prefix_esc . '%'
+            )
+        );
+
+        $total = intval( $deleted_legacy ) + intval( $deleted_transients );
+
+        // Flush WordPress object cache (covers RAM, Redis, Memcached)
+        wp_cache_flush();
+
+        echo '<div class="notice notice-success"><p>Translation cache cleared. Removed ' . $total . ' entries (' . intval( $deleted_legacy ) . ' legacy + ' . intval( $deleted_transients ) . ' transients).</p></div>';
     }
-    
+
     // Handle enabled languages
     if (isset($_POST['freedomtranslate_save_languages'])) {
         check_admin_referer('freedomtranslate_save_languages', 'freedomtranslate_nonce_languages');
@@ -927,6 +948,42 @@ add_action('save_post', function($post_id) {
     } else {
         delete_post_meta($post_id, '_freedomtranslate_exclude');
     }
+});
+
+/**
+ * Schedule automatic weekly cache purge on plugin activation
+ * Prevents unlimited growth of wp_options table over time
+ */
+register_activation_hook( __FILE__, function() {
+    if ( ! wp_next_scheduled( 'freedomtranslate_auto_purge' ) ) {
+        wp_schedule_event( time(), 'weekly', 'freedomtranslate_auto_purge' );
+    }
+});
+
+/**
+ * Remove scheduled cache purge event on plugin deactivation
+ */
+register_deactivation_hook( __FILE__, function() {
+    wp_clear_scheduled_hook( 'freedomtranslate_auto_purge' );
+});
+
+/**
+ * Worker for automatic weekly cache purge via WP-Cron
+ * With transients this is mostly a safety net since they expire automatically
+ */
+add_action( 'freedomtranslate_auto_purge', function() {
+    global $wpdb;
+    $prefix_esc = esc_sql( FREEDOMTRANSLATE_CACHE_PREFIX );
+
+    $wpdb->query(
+        $wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s",
+            '_transient_' . $prefix_esc . '%',
+            '_transient_timeout_' . $prefix_esc . '%'
+        )
+    );
+
+    wp_cache_flush();
 });
 
 add_action('wp_footer', function() {
