@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with LibreTranslate (localhost:5000) or remote URL with API + cache and language selection
-Version: 1.4.5
+Version: 1.4.6
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -301,38 +301,90 @@ function freedomtranslate_translate_google_official($text, $source, $target, $fo
  * @param string $format Format of text ('text' or 'html')
  * @return string Translated text or original text if translation fails
  */
-function freedomtranslate_translate_libre($text, $source, $target, $format = 'text') {
-    $api_url = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
-    $api_key = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
-    
-    $body = [
-        'q' => $text,
-        'source' => $source,
-        'target' => $target,
-        'format' => $format
-    ];
-    
-    if (!empty($api_key)) {
-        $body['api_key'] = $api_key;
+
+function freedomtranslate_split_text( $text, $max_length = 400 ) {
+    // chunking paragraphs first, then sentences if needed
+    $paragraphs = preg_split( '/(\n\n+)/u', $text, -1, PREG_SPLIT_DELIM_CAPTURE );
+    $chunks  = [];
+    $current = '';
+
+    foreach ( $paragraphs as $para ) {
+        if ( strlen( $current . $para ) <= $max_length ) {
+            $current .= $para;
+        } else {
+            // paragraph too long, split it first
+            if ( $current !== '' ) {
+                $chunks[] = $current;
+                $current  = '';
+            }
+            // chunking sentences
+            $sentences = preg_split( '/(?<=[.!?»])\s+/u', $para );
+            foreach ( $sentences as $sentence ) {
+                if ( strlen( $current . ' ' . $sentence ) > $max_length && $current !== '' ) {
+                    $chunks[] = trim( $current );
+                    $current  = $sentence;
+                } else {
+                    $current .= ' ' . $sentence;
+                }
+            }
+        }
     }
-    
-    $response = wp_remote_post($api_url, [
-        'body' => $body,
-        'timeout' => 120,
-    ]);
-    
-    if (is_wp_error($response)) {
-        return $text;
+    if ( trim( $current ) !== '' ) {
+        $chunks[] = trim( $current );
     }
-    
-    $body = wp_remote_retrieve_body($response);
-    $json = json_decode($body, true);
-    
-    if (!isset($json['translatedText'])) {
-        return $text;
+    return array_filter( $chunks );
+}
+
+/**
+ * Translate using LibreTranslate/MarianMT with chunking
+ */
+function freedomtranslate_translate_libre( $text, $source, $target, $format = 'text' ) {
+    $api_url = get_option( FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT );
+    $api_key = get_option( FREEDOMTRANSLATE_API_KEY_OPTION, '' );
+
+    // Threshold: if the text is short, send it directly, otherwise chunk it
+    $max_chunk = 400;
+
+    if ( mb_strlen( $text ) <= $max_chunk ) {
+        $chunks = [ $text ];
+    } else {
+        $chunks = freedomtranslate_split_text( $text, $max_chunk );
     }
-    
-    return $json['translatedText'];
+
+    $translated_chunks = [];
+
+    foreach ( $chunks as $chunk ) {
+        if ( trim( $chunk ) === '' ) {
+            $translated_chunks[] = $chunk;
+            continue;
+        }
+
+        $body = [
+            'q'      => $chunk,
+            'source' => $source,
+            'target' => $target,
+            'format' => $format,
+        ];
+        if ( ! empty( $api_key ) ) {
+            $body['api_key'] = $api_key;
+        }
+
+        $response = wp_remote_post( $api_url, [
+            'body'    => $body,
+            'timeout' => 60, // timeout for single chunk
+        ] );
+
+        if ( is_wp_error( $response ) ) {
+            // if any chunk fails, return original text to avoid partial translations
+            $translated_chunks[] = $chunk;
+            continue;
+        }
+
+        $json = json_decode( wp_remote_retrieve_body( $response ), true );
+        $translated_chunks[] = isset( $json['translatedText'] ) ? $json['translatedText'] : $chunk;
+    }
+
+    return implode( ' ', $translated_chunks );
 }
 
 /**
@@ -463,27 +515,30 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text') {
  * @return string Translated content
  */
 function freedomtranslate_filter_post_content($content) {
-if (is_admin()) return $content;
-
-global $post;
-if ($post && get_post_meta($post->ID, '_freedomtranslate_exclude', true) === '1') {
-    return $content;
-}
-
-$user_lang = freedomtranslate_get_user_lang();
-$site_lang = substr(get_locale(), 0, 2);
-
-if ($user_lang === $site_lang || !freedomtranslate_is_language_enabled($user_lang)) {
-    return $content;
-}
-
-// Execute shortcodes BEFORE translation
-$content = do_shortcode($content);
-
-// Now translate the rendered content
-$translated = freedomtranslate_translate($content, $site_lang, $user_lang, 'html');
-
-return $translated;
+    if (is_admin()) return $content;
+    
+    global $post;
+    if ($post && get_post_meta($post->ID, '_freedomtranslate_exclude', true) === '1') {
+        return $content;
+    }
+    
+    $user_lang = freedomtranslate_get_user_lang();
+    $site_lang = substr(get_locale(), 0, 2);
+    
+    if ($user_lang === $site_lang || !freedomtranslate_is_language_enabled($user_lang)) {
+        return $content;
+    }
+    
+    // Protect shortcode placeholder
+    $placeholder = '<!--freedomtranslate-selector-->';
+    $content = str_replace('[freedomtranslate_selector]', $placeholder, $content);
+    
+    $translated = freedomtranslate_translate($content, $site_lang, $user_lang, 'html');
+    
+    // Restore shortcode
+    $translated = str_replace($placeholder, '[freedomtranslate_selector]', $translated);
+    
+    return do_shortcode($translated);
 }
 add_filter('the_content', 'freedomtranslate_filter_post_content');
 add_filter('the_title', 'freedomtranslate_filter_post_content');
@@ -575,16 +630,19 @@ function freedomtranslate_settings_page() {
     }
     
     // Handle LibreTranslate API URL
-    if (isset($_POST['freedomtranslate_save_api_url'])) {
-        check_admin_referer('freedomtranslate_save_api_url', 'freedomtranslate_nonce_url');
-        $url = trim(sanitize_text_field(wp_unslash($_POST['freedomtranslate_api_url'])));
-        if (filter_var($url, FILTER_VALIDATE_URL)) {
-            update_option(FREEDOMTRANSLATE_API_URL_OPTION, esc_url_raw($url));
-            echo '<div class="notice notice-success"><p>API URL saved.</p></div>';
-        } else {
-            echo '<div class="notice notice-error"><p>Invalid API URL.</p></div>';
-        }
+if (isset($_POST['freedomtranslate_save_api_url'])) {
+    check_admin_referer('freedomtranslate_save_api_url', 'freedomtranslate_nonce_url');
+
+    $url = esc_url_raw(trim(wp_unslash($_POST['freedomtranslate_api_url'])));
+
+    if (!empty($url) && filter_var($url, FILTER_VALIDATE_URL)) {
+        delete_option(FREEDOMTRANSLATE_API_URL_OPTION);
+        add_option(FREEDOMTRANSLATE_API_URL_OPTION, $url, '', 'yes');
+        echo '<div class="notice notice-success"><p>API URL saved.</p></div>';
+    } else {
+        echo '<div class="notice notice-error"><p>Invalid API URL.</p></div>';
     }
+}
     
     // Handle LibreTranslate API key
     if (isset($_POST['freedomtranslate_save_api_key'])) {
