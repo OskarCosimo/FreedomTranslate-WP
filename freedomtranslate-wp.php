@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with LibreTranslate (localhost:5000) or remote URL with API + cache and language selection
-Version: 1.4.6
+Version: 1.4.7
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
