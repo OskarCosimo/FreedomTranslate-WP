@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with LibreTranslate (localhost:5000) or remote URL with API + cache and language selection
-Version: 1.4.7
+Version: 1.4.9
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -24,6 +24,7 @@ define('FREEDOMTRANSLATE_CACHE_PREFIX', 'freedomtranslate_cache_');
 define('FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION', 'freedomtranslate_service');
 define('FREEDOMTRANSLATE_LANG_DETECTION_MODE_OPTION', 'freedomtranslate_lang_detection_mode');
 define('FREEDOMTRANSLATE_DEFAULT_LANG_OPTION', 'freedomtranslate_default_lang');
+define('FREEDOMTRANSLATE_CHUNKING_OPTION', 'freedomtranslate_chunking');
 
 /**
  * Handle language selection from GET parameter and set cookie
@@ -336,19 +337,26 @@ function freedomtranslate_split_text( $text, $max_length = 400 ) {
 }
 
 /**
- * Translate using LibreTranslate/MarianMT with chunking
+ * Translate using LibreTranslate/MarianMT
+ * Optionally splits long texts into chunks to avoid timeouts (can be disabled from admin)
+ *
+ * @param string $text   Text to translate
+ * @param string $source Source language code
+ * @param string $target Target language code
+ * @param string $format Format of text ('text' or 'html')
+ * @return string Translated text or original text if translation fails
  */
 function freedomtranslate_translate_libre( $text, $source, $target, $format = 'text' ) {
-    $api_url = get_option( FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT );
-    $api_key = get_option( FREEDOMTRANSLATE_API_KEY_OPTION, '' );
+    $api_url        = get_option( FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT );
+    $api_key        = get_option( FREEDOMTRANSLATE_API_KEY_OPTION, '' );
+    $chunking_enabled = get_option( FREEDOMTRANSLATE_CHUNKING_OPTION, '0' ) === '1';
+    $max_chunk      = 400;
 
-    // Threshold: if the text is short, send it directly, otherwise chunk it
-    $max_chunk = 400;
-
-    if ( mb_strlen( $text ) <= $max_chunk ) {
-        $chunks = [ $text ];
-    } else {
+    // Use chunking only if enabled from admin settings
+    if ( $chunking_enabled && mb_strlen( $text ) > $max_chunk ) {
         $chunks = freedomtranslate_split_text( $text, $max_chunk );
+    } else {
+        $chunks = [ $text ];
     }
 
     $translated_chunks = [];
@@ -365,26 +373,26 @@ function freedomtranslate_translate_libre( $text, $source, $target, $format = 't
             'target' => $target,
             'format' => $format,
         ];
+
         if ( ! empty( $api_key ) ) {
             $body['api_key'] = $api_key;
         }
 
         $response = wp_remote_post( $api_url, [
             'body'    => $body,
-            'timeout' => 60, // timeout for single chunk
+            'timeout' => 60,
         ] );
 
         if ( is_wp_error( $response ) ) {
-            // if any chunk fails, return original text to avoid partial translations
             $translated_chunks[] = $chunk;
             continue;
         }
 
-        $json = json_decode( wp_remote_retrieve_body( $response ), true );
+        $json                = json_decode( wp_remote_retrieve_body( $response ), true );
         $translated_chunks[] = isset( $json['translatedText'] ) ? $json['translatedText'] : $chunk;
     }
 
-    return implode( ' ', $translated_chunks );
+    return implode( '', $translated_chunks );
 }
 
 /**
@@ -671,6 +679,14 @@ if (isset($_POST['freedomtranslate_save_api_url'])) {
         echo '<div class="notice notice-error"><p>Invalid API URL.</p></div>';
     }
 }
+
+    // Handle chunking toggle
+    if ( isset( $_POST['freedomtranslate_save_chunking'] ) ) {
+        check_admin_referer( 'freedomtranslate_save_chunking', 'freedomtranslate_nonce_chunking' );
+        $chunking = isset( $_POST['freedomtranslate_chunking'] ) ? '1' : '0';
+        update_option( FREEDOMTRANSLATE_CHUNKING_OPTION, $chunking );
+        echo '<div class="notice notice-success"><p>Chunking setting saved.</p></div>';
+    }
     
     // Handle LibreTranslate API key
     if (isset($_POST['freedomtranslate_save_api_key'])) {
@@ -836,6 +852,29 @@ if (isset($_POST['freedomtranslate_save_api_url'])) {
                 </table>
                 <button type="submit" name="freedomtranslate_save_api_key" class="button button-primary">Save API Key</button>
             </form>
+
+                        <form method="post" style="margin-top: 15px;">
+                <?php wp_nonce_field( 'freedomtranslate_save_chunking', 'freedomtranslate_nonce_chunking' ); ?>
+                <table class="form-table">
+                    <tr>
+                        <th>Text Chunking</th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="freedomtranslate_chunking" value="1"
+                                    <?php checked( get_option( FREEDOMTRANSLATE_CHUNKING_OPTION, '0' ), '1' ); ?>>
+                                <strong>Enable chunking for long texts</strong>
+                            </label>
+                            <p class="description" style="margin-top: 6px;">
+                                Splits long content into 400-character chunks before translating.<br>
+                                ⚠️ <strong>Enable only if you get timeout errors on long posts.</strong><br>
+                                May cause layout issues on pages with complex HTML (e.g. WooCommerce stores).
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+                <button type="submit" name="freedomtranslate_save_chunking" class="button button-primary">Save Chunking</button>
+            </form>
+
         </div>
         
         <!-- Google Cloud Translation API Settings -->
@@ -1023,6 +1062,13 @@ add_action( 'wp_footer', function() {
     $current_service = get_option( FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'freedomtranslate_service' );
 
     if ( $current_service === 'googlehash' ) {
+
+        // Check if the current post/page is excluded from translation
+        $post_id = get_the_ID();
+        if ( $post_id && get_post_meta( $post_id, 'freedomtranslate_exclude', true ) == 1 ) {
+            return;
+        }
+
         $user_lang = freedomtranslate_get_user_lang();
         $site_lang = substr( get_locale(), 0, 2 );
         ?>
