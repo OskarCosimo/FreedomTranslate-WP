@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with LibreTranslate (localhost:5000) or remote URL with API + cache and language selection
-Version: 1.5.0
+Version: 1.5.1
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -25,6 +25,7 @@ define('FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION', 'freedomtranslate_service'
 define('FREEDOMTRANSLATE_LANG_DETECTION_MODE_OPTION', 'freedomtranslate_lang_detection_mode');
 define('FREEDOMTRANSLATE_DEFAULT_LANG_OPTION',        'freedomtranslate_default_lang');
 define('FREEDOMTRANSLATE_CACHE_TTL_OPTION',           'freedomtranslate_cache_ttl_global');
+define('FREEDOMTRANSLATE_AUTO_INJECT_OPTION',         'freedomtranslate_auto_inject');
 // Translation mode for LibreTranslate: 'sync' | 'chunks' | 'async'
 define('FREEDOMTRANSLATE_LIBRE_MODE_OPTION',          'freedomtranslate_libre_mode');
 
@@ -161,9 +162,11 @@ function freedomtranslate_language_selector_shortcode() {
     .freedomtranslate-spinner{border:4px solid #f3f3f3;border-top:4px solid #3498db;border-radius:50%;width:50px;height:50px;animation:freedomtranslate-spin 1s linear infinite;margin:0 auto 15px;}
     @keyframes freedomtranslate-spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
     .freedomtranslate-loader-content p{margin:0;font-size:16px;color:#333;font-weight:500;}
-    #freedomtranslate-async-banner{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:12px 24px;border-radius:8px;font-size:14px;z-index:999998;display:flex;align-items:center;gap:10px;box-shadow:0 4px 15px rgba(0,0,0,0.3);}
-    #freedomtranslate-async-banner .ft-banner-spinner{border:3px solid rgba(255,255,255,0.3);border-top:3px solid #fff;border-radius:50%;width:16px;height:16px;animation:freedomtranslate-spin 1s linear infinite;flex-shrink:0;}
-    #freedomtranslate-async-banner.ft-ready{background:#27ae60;cursor:pointer;}
+    .ft-progress-banner{display:none;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:#555;}
+    .ft-progress-banner.ft-pb-visible{display:flex;}
+    .ft-progress-banner .ft-pb-spinner{border:2px solid #ccc;border-top:2px solid #3498db;border-radius:50%;width:14px;height:14px;animation:freedomtranslate-spin 1s linear infinite;flex-shrink:0;}
+    .ft-progress-banner.ft-pb-ready{color:#27ae60;}
+    .ft-progress-banner.ft-pb-ready .ft-pb-spinner{display:none;}
     </style>';
 
     $html .= '<script>
@@ -172,6 +175,17 @@ function freedomtranslate_language_selector_shortcode() {
         window.addEventListener("DOMContentLoaded",function(){var l=document.getElementById("freedomtranslate-loader");if(l)l.style.display="flex";});
     }
     </script>';
+
+    // Inline progress banner — shown only when an async translation is running
+    // Uses class + data-cache-key (not id) so multiple widgets on the same page work fine
+    global $freedomtranslate_active_cache_key;
+    if (!empty($freedomtranslate_active_cache_key)) {
+        $ck = esc_attr($freedomtranslate_active_cache_key);
+        $html .= '<div class="ft-progress-banner ft-pb-visible" data-cache-key="' . $ck . '">'
+               . '<div class="ft-pb-spinner"></div>'
+               . '<span class="ft-pb-text">Translation in progress...</span>'
+               . '</div>';
+    }
 
     return $html;
 }
@@ -334,7 +348,14 @@ function freedomtranslate_translate_html_by_nodes($html, $source, $target, $api_
         $original = $textNode->nodeValue;
         if (trim($original) === '') continue;
 
-        $body = ['q' => $original, 'source' => $source, 'target' => $target, 'format' => 'text'];
+        // Preserve leading/trailing whitespace: LibreTranslate strips them,
+        // causing missing spaces after inline tags like </a> </strong> </em>
+        preg_match('/^(\s*)/', $original, $lm);
+        preg_match('/(\s*)$/', $original, $tm);
+        $leading_space  = isset($lm[1])  ? $lm[1]  : '';
+        $trailing_space = isset($tm[1]) ? $tm[1] : '';
+
+        $body = ['q' => trim($original), 'source' => $source, 'target' => $target, 'format' => 'text'];
         if (!empty($api_key)) $body['api_key'] = $api_key;
 
         $response = wp_remote_post($api_url, ['body' => $body, 'timeout' => 60]);
@@ -342,7 +363,7 @@ function freedomtranslate_translate_html_by_nodes($html, $source, $target, $api_
 
         $json = json_decode(wp_remote_retrieve_body($response), true);
         if (isset($json['translatedText'])) {
-            $textNode->nodeValue = $json['translatedText'];
+            $textNode->nodeValue = $leading_space . $json['translatedText'] . $trailing_space;
         }
     }
 
@@ -447,12 +468,27 @@ function freedomtranslate_async_worker($cache_key, $content, $site_lang, $user_l
         list($content, $placeholders) = freedomtranslate_protect_excluded_words_in_html($content, $excluded_words);
     }
 
-$api_url = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
-$api_key = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
+    $api_url = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
+    $api_key = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
 
-// Translate node-by-node via DOMDocument: HTML structure is never touched,
-// each text node is sent as plain text — safe even for very long posts
-$translated = freedomtranslate_translate_html_by_nodes($content, $site_lang, $user_lang, $api_url, $api_key);
+    // Split HTML into ~3000-char block-level chunks and translate each one separately.
+    // Progress is saved after every chunk so the JS banner shows a real percentage.
+    $chunks           = freedomtranslate_split_html_into_chunks($content, 3000);
+    $total_chunks     = count($chunks);
+    $translated_parts = array();
+
+    foreach ($chunks as $i => $chunk) {
+        $translated_parts[] = freedomtranslate_translate_html_by_nodes(
+            $chunk, $site_lang, $user_lang, $api_url, $api_key
+        );
+        set_transient(
+            'freedomtranslate_progress_' . md5($cache_key),
+            array('done' => $i + 1, 'total' => $total_chunks),
+            HOUR_IN_SECONDS
+        );
+    }
+
+    $translated = implode('', $translated_parts);
 
     // Restore excluded words
     if (!empty($placeholders)) {
@@ -461,15 +497,42 @@ $translated = freedomtranslate_translate_html_by_nodes($content, $site_lang, $us
 
     $translated = str_replace($placeholder, '[freedomtranslate_selector]', $translated);
 
-    // Store under the EXACT cache_key so filter_post_content returns it on the next request
+    // Store final result under the EXACT cache_key
     set_transient($cache_key, $translated, DAY_IN_SECONDS * freedomtranslate_get_ttl_days($post_id));
 
-    // Set ready flag — the JS polls: admin-ajax?action=freedomtranslate_check_ready&cache_key=<cache_key>
-    // The ready transient key is md5(cache_key) to keep it short and consistent
+    // Set ready flag
     set_transient('freedomtranslate_ready_' . md5($cache_key), '1', HOUR_IN_SECONDS);
 
-    // Remove the pending dedup flag so future cache expiries can re-schedule correctly
+    // Clean up
+    delete_transient('freedomtranslate_progress_' . md5($cache_key));
     delete_transient('freedomtranslate_pending_' . md5($cache_key));
+}
+
+/**
+ * Split HTML into block-level chunks for incremental background translation.
+ * Splits only before block-level tags so inline elements are never broken.
+ *
+ * @param string $html
+ * @param int    $max_chars
+ * @return array
+ */
+function freedomtranslate_split_html_into_chunks($html, $max_chars = 3000) {
+    $blocks  = preg_split(
+        '/(?=<(?:p|div|h[1-6]|li|blockquote|pre|table|ul|ol|figure|tr|section|article)[\s>])/i',
+        $html, -1, PREG_SPLIT_NO_EMPTY
+    );
+    $chunks  = array();
+    $current = '';
+    foreach ($blocks as $block) {
+        if ($current !== '' && strlen($current) + strlen($block) > $max_chars) {
+            $chunks[] = $current;
+            $current  = $block;
+        } else {
+            $current .= $block;
+        }
+    }
+    if ($current !== '') $chunks[] = $current;
+    return $chunks ? $chunks : array($html);
 }
 add_action('freedomtranslate_async_translate', 'freedomtranslate_async_worker', 10, 5);
 
@@ -479,10 +542,22 @@ add_action('freedomtranslate_async_translate', 'freedomtranslate_async_worker', 
  */
 function freedomtranslate_ajax_check_ready() {
     $cache_key = isset($_GET['cache_key']) ? sanitize_text_field(wp_unslash($_GET['cache_key'])) : '';
-    if (empty($cache_key)) { wp_send_json(['ready' => false]); }
+    if (empty($cache_key)) { wp_send_json(array('ready' => false, 'progress' => 0)); return; }
+
     // The ready flag is stored as md5(cache_key) — must match what the worker sets
     $ready = get_transient('freedomtranslate_ready_' . md5($cache_key)) !== false;
-    wp_send_json(['ready' => $ready]);
+    if ($ready) {
+        wp_send_json(array('ready' => true, 'progress' => 100));
+        return;
+    }
+
+    // Return incremental progress percentage while the worker is still running
+    $progress_data = get_transient('freedomtranslate_progress_' . md5($cache_key));
+    $percent = 0;
+    if (is_array($progress_data) && !empty($progress_data['total'])) {
+        $percent = (int) round(($progress_data['done'] / $progress_data['total']) * 100);
+    }
+    wp_send_json(array('ready' => false, 'progress' => $percent));
 }
 add_action('wp_ajax_nopriv_freedomtranslate_check_ready', 'freedomtranslate_ajax_check_ready');
 add_action('wp_ajax_freedomtranslate_check_ready',        'freedomtranslate_ajax_check_ready');
@@ -532,7 +607,12 @@ function freedomtranslate_filter_post_content($content) {
             ]);
         }
 
-        // Inject polling banner in footer only when translation is still pending
+        // Store active cache_key globally so the language selector shortcode
+        // can render the inline progress banner right below the widget
+        global $freedomtranslate_active_cache_key;
+        $freedomtranslate_active_cache_key = $cache_key;
+
+        // Inject polling JS in footer (HTML banner is rendered inline by the shortcode)
         add_action('wp_footer', function() use ($cache_key) {
             freedomtranslate_async_banner_script($cache_key);
         });
@@ -552,6 +632,38 @@ add_filter('the_content', 'freedomtranslate_filter_post_content');
 add_filter('the_title',   'freedomtranslate_filter_post_content');
 
 /**
+ * Auto-inject the language selector shortcode at the top of pages and/or posts
+ * based on the admin setting. Runs at priority 5, before the translation filter.
+ */
+add_filter('the_content', function($content) {
+    if (is_admin()) return $content;
+    $auto_inject = get_option(FREEDOMTRANSLATE_AUTO_INJECT_OPTION, array());
+    if (empty($auto_inject)) return $content;
+    $post_type = get_post_type();
+    $should_inject = (in_array('page', $auto_inject, true) && $post_type === 'page')
+                  || (in_array('post', $auto_inject, true) && $post_type === 'post');
+    if (!$should_inject) return $content;
+    return '[freedomtranslate_selector]' . $content;
+}, 9);
+
+/**
+ * Per-post inject: if the post has _freedomtranslate_inject_selector meta set,
+ * prepend the language selector shortcode right after the title (at content top).
+ * Priority 9 so it runs before the translation filter and the shortcode
+ * gets protected by the placeholder mechanism.
+ */
+add_filter('the_content', function($content) {
+    if (is_admin()) return $content;
+    $post_id = get_the_ID();
+    if (!$post_id) return $content;
+    if (get_post_meta($post_id, '_freedomtranslate_inject_selector', true) !== '1') return $content;
+    // Skip if the global auto-inject already added it for this post type
+    // (the translation filter will handle de-duplication via placeholder)
+    return '[freedomtranslate_selector]' . $content;
+}, 9);
+
+
+/**
  * Output async translation banner + JS polling in the page footer
  *
  * FIX: Uses sessionStorage flag keyed on cache_key to suppress the banner
@@ -563,10 +675,6 @@ add_filter('the_title',   'freedomtranslate_filter_post_content');
 function freedomtranslate_async_banner_script($cache_key) {
     $ajax_url = admin_url('admin-ajax.php');
     ?>
-    <div id="freedomtranslate-async-banner" name="freedomtranslate-async-banner" class="freedomtranslate-async-banner">
-        <div class="ft-banner-spinner"></div>
-        <span id="ft-banner-text">Translation in progress in background... Please wait</span>
-    </div>
     <script>
     (function() {
         var cacheKey    = <?php echo json_encode($cache_key); ?>;
@@ -577,24 +685,24 @@ function freedomtranslate_async_banner_script($cache_key) {
         // this script detects it and hides the banner immediately —
         // preventing the infinite-reload bug.
         var sessionFlag = 'ft_reloaded_' + cacheKey;
-var isSingular  = <?php echo json_encode(is_singular()); ?>;
+// isSingular check removed: the inline banner is shown on all page types
+// and is hidden only when translation is ready or after maxAttempts give-up
 
-// On archive/homepage auto-hide after 30 s — no reload needed there
-if (!isSingular) {
-    setTimeout(function() {
-        clearInterval(interval);
-        var banners = document.getElementsByClassName('freedomtranslate-async-banner');
-        for (var i = 0; i < banners.length; i++) {
-            banners[i].style.display = 'none';
+        // Helper: trova tutti i banner inline con questo cache_key
+        function getBanners() {
+            var all = document.querySelectorAll('.ft-progress-banner[data-cache-key]');
+            var res = [];
+            for (var i = 0; i < all.length; i++) {
+                if (all[i].getAttribute('data-cache-key') === cacheKey) res.push(all[i]);
+            }
+            return res;
         }
-    }, 30000);
-}
 
         // If we already triggered a reload for this translation in this session,
-        // the cache is ready: hide the banner and stop here.
+        // the cache is ready: hide all banners and stop.
         if (sessionStorage.getItem(sessionFlag)) {
-            var b = document.getElementById('freedomtranslate-async-banner');
-            if (b) b.style.display = 'none';
+            var bs = getBanners();
+            for (var i = 0; i < bs.length; i++) bs[i].classList.remove('ft-pb-visible');
             return;
         }
 
@@ -605,10 +713,10 @@ if (!isSingular) {
         function checkReady() {
             attempts++;
             if (attempts > maxAttempts) {
-                // Give up: hide the banner gracefully
+                // Give up: hide all matching banners gracefully
                 clearInterval(interval);
-                var banner = document.getElementById('freedomtranslate-async-banner');
-                if (banner) banner.style.display = 'none';
+                var bns = getBanners();
+                for (var i = 0; i < bns.length; i++) bns[i].classList.remove('ft-pb-visible');
                 return;
             }
 
@@ -620,30 +728,31 @@ if (!isSingular) {
                         var data = JSON.parse(xhr.responseText);
                         if (data.ready) {
                             clearInterval(interval);
-
-                            // Update banner UI to "ready" state
-                            var banner  = document.getElementById('freedomtranslate-async-banner');
-                            var spinner = banner ? banner.querySelector('.ft-banner-spinner') : null;
-                            var text    = document.getElementById('ft-banner-text');
-                            if (banner)  banner.classList.add('ft-ready');
-                            if (spinner) spinner.style.display = 'none';
-                            if (text)    text.textContent = 'Translation ready! Reloading...';
-
-                            // Allow user to click the banner for an immediate reload
-                            if (banner) {
-                                banner.addEventListener('click', function() {
+                            // Mark all matching banners as ready
+                            var bns = getBanners();
+                            for (var bi = 0; bi < bns.length; bi++) {
+                                bns[bi].classList.add('ft-pb-ready');
+                                var sp = bns[bi].querySelector('.ft-pb-spinner');
+                                var tx = bns[bi].querySelector('.ft-pb-text');
+                                if (sp) sp.style.display = 'none';
+                                if (tx) tx.textContent = 'Translation ready! Reloading...';
+                                bns[bi].style.cursor = 'pointer';
+                                bns[bi].addEventListener('click', function() {
                                     sessionStorage.setItem(sessionFlag, '1');
                                     window.location.reload();
                                 });
                             }
-
-                            // Auto-reload after 2 seconds.
-                            // Set the flag BEFORE reload so the next page load
-                            // recognises it was already reloaded and skips the banner.
                             setTimeout(function() {
                                 sessionStorage.setItem(sessionFlag, '1');
                                 window.location.reload();
                             }, 2000);
+                        } else if (typeof data.progress !== 'undefined' && data.progress > 0) {
+                            // Update progress % in all matching banners
+                            var bns = getBanners();
+                            for (var bi = 0; bi < bns.length; bi++) {
+                                var tx = bns[bi].querySelector('.ft-pb-text');
+                                if (tx) tx.textContent = 'Translation in progress... ' + data.progress + '%';
+                            }
                         }
                     } catch(e) {}
                 }
@@ -742,6 +851,20 @@ function freedomtranslate_settings_page() {
         $words = array_filter(array_map('trim', preg_split('/\R/', sanitize_textarea_field(wp_unslash($_POST['freedomtranslate_excluded_words'])))));
         update_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, $words);
         echo '<div class="notice notice-success"><p>Excluded words saved.</p></div>';
+    }
+
+    if (isset($_POST['freedomtranslate_save_auto_inject'])) {
+        check_admin_referer('freedomtranslate_save_auto_inject', 'freedomtranslate_nonce_auto_inject');
+        $inject = array();
+        if (isset($_POST['freedomtranslate_auto_inject']) && is_array($_POST['freedomtranslate_auto_inject'])) {
+            $allowed = array('page', 'post');
+            foreach ($_POST['freedomtranslate_auto_inject'] as $v) {
+                $v = sanitize_text_field($v);
+                if (in_array($v, $allowed, true)) $inject[] = $v;
+            }
+        }
+        update_option(FREEDOMTRANSLATE_AUTO_INJECT_OPTION, $inject);
+        echo '<div class="notice notice-success"><p>Auto-inject settings saved.</p></div>';
     }
 
     if (isset($_POST['freedomtranslate_save_google_api_key'])) {
@@ -936,6 +1059,29 @@ function freedomtranslate_settings_page() {
             </form>
         </div>
 
+        <!-- Auto-inject Selector -->
+        <div class="card" style="margin-top:20px;">
+            <h2>Auto-inject Language Selector</h2>
+            <p class="description">Automatically prepend the <code>[freedomtranslate_selector]</code> widget at the top of the content. Only applies if the shortcode is not already present in the content.</p>
+            <form method="post">
+                <?php wp_nonce_field('freedomtranslate_save_auto_inject', 'freedomtranslate_nonce_auto_inject'); ?>
+                <?php $auto_inject = get_option(FREEDOMTRANSLATE_AUTO_INJECT_OPTION, array()); ?>
+                <p style="margin-top:12px;">
+                    <label style="display:block;margin-bottom:8px;">
+                        <input type="checkbox" name="freedomtranslate_auto_inject[]" value="page"
+                            <?php checked(in_array('page', $auto_inject, true)); ?>> 
+                        <strong>Pages</strong> &mdash; inject on all WordPress pages
+                    </label>
+                    <label style="display:block;margin-bottom:8px;">
+                        <input type="checkbox" name="freedomtranslate_auto_inject[]" value="post"
+                            <?php checked(in_array('post', $auto_inject, true)); ?>>
+                        <strong>Posts</strong> &mdash; inject on all WordPress posts
+                    </label>
+                </p>
+                <button type="submit" name="freedomtranslate_save_auto_inject" class="button button-primary">Save Auto-inject Settings</button>
+            </form>
+        </div>
+
         <!-- Cache Management -->
         <div class="card" style="margin-top:20px;">
             <h2>Cache Management</h2>
@@ -994,6 +1140,10 @@ add_action('add_meta_boxes', function() {
             $exclude    = get_post_meta($post->ID, '_freedomtranslate_exclude', true);
             $ttl_days   = get_post_meta($post->ID, '_freedomtranslate_cache_ttl', true);
             $global_ttl = get_option(FREEDOMTRANSLATE_CACHE_TTL_OPTION, 30);
+            $inject_selector = get_post_meta($post->ID, '_freedomtranslate_inject_selector', true);
+            echo '<label><input type="checkbox" name="freedomtranslate_inject_selector" value="1" ' . checked($inject_selector,'1',false) . '> ';
+            echo esc_html('Inject language selector at top of this post/page') . '</label>';
+            echo '<br style="margin:6px 0;">';
             echo '<label><input type="checkbox" name="freedomtranslate_exclude" value="1" ' . checked($exclude,'1',false) . '> ';
             echo esc_html('Exclude this page/post from automatic translation') . '</label>';
             echo '<p style="margin-top:12px;"><label for="freedomtranslate_cache_ttl"><strong>Cache duration (days):</strong></label><br>';
@@ -1013,6 +1163,12 @@ add_action('save_post', function($post_id) {
     if (!isset($_POST['freedomtranslate_meta_nonce']) ||
         !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['freedomtranslate_meta_nonce'])), 'freedomtranslate_metabox')) return;
     if (!current_user_can('edit_post', $post_id)) return;
+
+    if (isset($_POST['freedomtranslate_inject_selector'])) {
+        update_post_meta($post_id, '_freedomtranslate_inject_selector', '1');
+    } else {
+        delete_post_meta($post_id, '_freedomtranslate_inject_selector');
+    }
 
     if (isset($_POST['freedomtranslate_exclude'])) {
         update_post_meta($post_id, '_freedomtranslate_exclude', '1');
