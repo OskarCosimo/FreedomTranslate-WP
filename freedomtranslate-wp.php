@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with LibreTranslate (localhost:5000) or remote URL with API + cache and language selection
-Version: 1.5.1
+Version: 1.5.2
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -335,27 +335,44 @@ function freedomtranslate_restore_excluded_words_in_html($text, $placeholders) {
  * @return string Translated HTML with original structure preserved
  */
 function freedomtranslate_translate_html_by_nodes($html, $source, $target, $api_url, $api_key) {
-    $dom = new DOMDocument();
+    $dom = new DOMDocument('1.0', 'UTF-8');
     libxml_use_internal_errors(true);
-    $dom->loadHTML(mb_convert_encoding($html, 'HTML-ENTITIES', 'UTF-8'));
+
+    // Inject charset meta so DOMDocument handles UTF-8 correctly without
+    // converting multibyte chars to HTML entities (which breaks WooCommerce
+    // data-* attributes, prices with currency symbols, JSON inline data, etc.)
+    $dom->loadHTML(
+        '<html><head><meta charset="UTF-8"></head><body>' . $html . '</body></html>',
+        LIBXML_HTML_NODEFDTD | LIBXML_NOERROR | LIBXML_NOWARNING
+    );
     libxml_clear_errors();
 
     $xpath     = new DOMXPath($dom);
-    // Select only text nodes that are not empty and not inside <script> or <style>
-    $textNodes = $xpath->query('//text()[normalize-space(.) != ""][not(ancestor::script)][not(ancestor::style)]');
+    // Select text nodes: skip script, style, and any element with data-* JSON attributes
+    $textNodes = $xpath->query(
+        '//text()[normalize-space(.) != ""]'
+        . '[not(ancestor::script)]'
+        . '[not(ancestor::style)]'
+        . '[not(ancestor::*[@data-product_id])]'
+        . '[not(ancestor::*[@data-cart_hash])]'
+    );
 
     foreach ($textNodes as $textNode) {
         $original = $textNode->nodeValue;
         if (trim($original) === '') continue;
 
-        // Preserve leading/trailing whitespace: LibreTranslate strips them,
-        // causing missing spaces after inline tags like </a> </strong> </em>
+        // Skip text nodes that look like JSON, numbers-only, or currency values
+        $trimmed = trim($original);
+        if (preg_match('/^[\d\s.,+\-\/\\%$€£¥#@!*()\[\]{}=&^~`\'":;<>|_]+$/u', $trimmed)) continue;
+        if ($trimmed[0] === '{' || $trimmed[0] === '[') continue;
+
+        // Preserve leading/trailing whitespace
         preg_match('/^(\s*)/', $original, $lm);
         preg_match('/(\s*)$/', $original, $tm);
-        $leading_space  = isset($lm[1])  ? $lm[1]  : '';
+        $leading_space  = isset($lm[1]) ? $lm[1] : '';
         $trailing_space = isset($tm[1]) ? $tm[1] : '';
 
-        $body = ['q' => trim($original), 'source' => $source, 'target' => $target, 'format' => 'text'];
+        $body = ['q' => $trimmed, 'source' => $source, 'target' => $target, 'format' => 'text'];
         if (!empty($api_key)) $body['api_key'] = $api_key;
 
         $response = wp_remote_post($api_url, ['body' => $body, 'timeout' => 60]);
@@ -367,9 +384,18 @@ function freedomtranslate_translate_html_by_nodes($html, $source, $target, $api_
         }
     }
 
-    $translated = $dom->saveHTML();
-    // Remove DOCTYPE/html/body wrappers added by DOMDocument
-    $translated = preg_replace('~<(?:!DOCTYPE|/?(?:html|body))[^>]*>\s*~i', '', $translated);
+    // Extract only the <body> content, stripping the html/head/body wrappers
+    // we added above — this is safer than regex on the full saveHTML() output
+    $body_node = $dom->getElementsByTagName('body')->item(0);
+    if (!$body_node) {
+        // Fallback: strip wrappers with regex
+        $out = $dom->saveHTML();
+        return preg_replace('~<(?:!DOCTYPE|/?html|/?head|/?body)[^>]*>\s*~i', '', $out);
+    }
+    $translated = '';
+    foreach ($body_node->childNodes as $child) {
+        $translated .= $dom->saveHTML($child);
+    }
     return $translated;
 }
 
@@ -576,6 +602,14 @@ function freedomtranslate_filter_post_content($content) {
 
     global $post;
     if ($post && get_post_meta($post->ID, '_freedomtranslate_exclude', true) === '1') return $content;
+
+    // Skip WooCommerce internal post types to avoid breaking shop pages
+    if ($post) {
+        $skip_types = apply_filters('freedomtranslate_skip_post_types',
+            array('shop_order', 'shop_coupon', 'shop_webhook', 'wc_order', 'wc_product_tab')
+        );
+        if (in_array($post->post_type, $skip_types, true)) return $content;
+    }
 
     $user_lang = freedomtranslate_get_user_lang();
     $site_lang = substr(get_locale(), 0, 2);
