@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with LibreTranslate (localhost:5000) or remote URL with API + cache and language selection
-Version: 1.5.2
+Version: 1.5.3
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -335,68 +335,70 @@ function freedomtranslate_restore_excluded_words_in_html($text, $placeholders) {
  * @return string Translated HTML with original structure preserved
  */
 function freedomtranslate_translate_html_by_nodes($html, $source, $target, $api_url, $api_key) {
-    $dom = new DOMDocument('1.0', 'UTF-8');
-    libxml_use_internal_errors(true);
+    // Strategy: extract text segments between/outside HTML tags using regex,
+    // translate only those, then substitute back — the HTML is NEVER parsed
+    // or reconstructed, so complex markup (WooCommerce, page builders, etc.)
+    // is always preserved byte-for-byte.
 
-    // Inject charset meta so DOMDocument handles UTF-8 correctly without
-    // converting multibyte chars to HTML entities (which breaks WooCommerce
-    // data-* attributes, prices with currency symbols, JSON inline data, etc.)
-    $dom->loadHTML(
-        '<html><head><meta charset="UTF-8"></head><body>' . $html . '</body></html>',
-        LIBXML_HTML_NODEFDTD | LIBXML_NOERROR | LIBXML_NOWARNING
-    );
-    libxml_clear_errors();
+    // Split the HTML into alternating: [text, tag, text, tag, ...]
+    // The regex captures everything that is either a tag (< ... >) or text between tags.
+    $parts = preg_split('/(<[^>]+>)/s', $html, -1, PREG_SPLIT_DELIM_CAPTURE);
+    if ($parts === false) return $html;
 
-    $xpath     = new DOMXPath($dom);
-    // Select text nodes: skip script, style, and any element with data-* JSON attributes
-    $textNodes = $xpath->query(
-        '//text()[normalize-space(.) != ""]'
-        . '[not(ancestor::script)]'
-        . '[not(ancestor::style)]'
-        . '[not(ancestor::*[@data-product_id])]'
-        . '[not(ancestor::*[@data-cart_hash])]'
-    );
+    // Track whether we are inside a <script> or <style> block
+    $skip_depth = 0;
+    $result     = array();
 
-    foreach ($textNodes as $textNode) {
-        $original = $textNode->nodeValue;
-        if (trim($original) === '') continue;
+    foreach ($parts as $part) {
+        // It's a tag
+        if (isset($part[0]) && $part[0] === '<') {
+            $result[] = $part;
+            $tag_name = '';
+            if (preg_match('/<\/?([a-zA-Z][a-zA-Z0-9]*)/', $part, $tm)) {
+                $tag_name = strtolower($tm[1]);
+            }
+            if (in_array($tag_name, array('script', 'style'), true)) {
+                if ($part[1] === '/') {
+                    $skip_depth = max(0, $skip_depth - 1);
+                } else {
+                    $skip_depth++;
+                }
+            }
+            continue;
+        }
 
-        // Skip text nodes that look like JSON, numbers-only, or currency values
-        $trimmed = trim($original);
-        if (preg_match('/^[\d\s.,+\-\/\\%$€£¥#@!*()\[\]{}=&^~`\'":;<>|_]+$/u', $trimmed)) continue;
-        if ($trimmed[0] === '{' || $trimmed[0] === '[') continue;
+        // It's a text segment — skip if inside script/style or empty
+        if ($skip_depth > 0 || trim($part) === '') {
+            $result[] = $part;
+            continue;
+        }
 
         // Preserve leading/trailing whitespace
-        preg_match('/^(\s*)/', $original, $lm);
-        preg_match('/(\s*)$/', $original, $tm);
-        $leading_space  = isset($lm[1]) ? $lm[1] : '';
-        $trailing_space = isset($tm[1]) ? $tm[1] : '';
+        preg_match('/^(\s*)/', $part, $lm);
+        preg_match('/(\s*)$/', $part, $tm);
+        $leading  = isset($lm[1]) ? $lm[1] : '';
+        $trailing = isset($tm[1]) ? $tm[1] : '';
+        $trimmed  = trim($part);
+
+        // Skip text that is purely numeric, punctuation, or looks like code/JSON
+        if ($trimmed === '') { $result[] = $part; continue; }
+        if (!preg_match('/\p{L}/u', $trimmed)) { $result[] = $part; continue; }
 
         $body = ['q' => $trimmed, 'source' => $source, 'target' => $target, 'format' => 'text'];
         if (!empty($api_key)) $body['api_key'] = $api_key;
 
         $response = wp_remote_post($api_url, ['body' => $body, 'timeout' => 60]);
-        if (is_wp_error($response)) continue;
+        if (is_wp_error($response)) { $result[] = $part; continue; }
 
         $json = json_decode(wp_remote_retrieve_body($response), true);
         if (isset($json['translatedText'])) {
-            $textNode->nodeValue = $leading_space . $json['translatedText'] . $trailing_space;
+            $result[] = $leading . $json['translatedText'] . $trailing;
+        } else {
+            $result[] = $part;
         }
     }
 
-    // Extract only the <body> content, stripping the html/head/body wrappers
-    // we added above — this is safer than regex on the full saveHTML() output
-    $body_node = $dom->getElementsByTagName('body')->item(0);
-    if (!$body_node) {
-        // Fallback: strip wrappers with regex
-        $out = $dom->saveHTML();
-        return preg_replace('~<(?:!DOCTYPE|/?html|/?head|/?body)[^>]*>\s*~i', '', $out);
-    }
-    $translated = '';
-    foreach ($body_node->childNodes as $child) {
-        $translated .= $dom->saveHTML($child);
-    }
-    return $translated;
+    return implode('', $result);
 }
 
 /**
