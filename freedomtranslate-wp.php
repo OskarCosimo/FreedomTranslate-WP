@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + cache, auto-prewarm, and static strings manager.
-Version: 1.5.6
+Version: 1.5.8
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -29,6 +29,40 @@ define('FREEDOMTRANSLATE_AUTO_INJECT_OPTION',         'freedomtranslate_auto_inj
 define('FREEDOMTRANSLATE_LIBRE_MODE_OPTION',          'freedomtranslate_libre_mode');
 define('FREEDOMTRANSLATE_PREWARM_OPTION',             'freedomtranslate_prewarm_on_save');
 define('FREEDOMTRANSLATE_STATIC_STRINGS_OPTION',      'freedomtranslate_static_strings');
+define('FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION', 'freedomtranslate_bot_signatures');
+
+function freedomtranslate_get_default_bots_string() {
+    return "googlebot\nbingbot\nyandex\nduckduckbot\nslurp\nbaiduspider\nia_archiver\ntwitterbot\nfacebookexternalhit\nrogerbot\nlinkedinbot\nembedly\nquora link preview\nshowyoubot\noutbrain\npinterest\nslackbot\nvkshare\nw3c_validator\nsemrushbot\nahrefsbot\nmj12bot\ndotbot\npetalbot\nseznambot\nbot\nspider\ncrawl\nscraper";
+}
+
+/**
+ * Detects if the current visitor is a bot/crawler using ONLY the database list.
+ */
+function freedomtranslate_is_bot() {
+    $user_agent = isset($_SERVER['HTTP_USER_AGENT']) ? strtolower($_SERVER['HTTP_USER_AGENT']) : '';
+    // I bot più basilari a volte omettono l'user-agent. Li blocchiamo per sicurezza.
+    if (empty($user_agent)) return true; 
+
+    // Recupera la lista dal DB (ritorna 'false' solo se l'opzione non è MAI stata salvata)
+    $bot_signatures = get_option(FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION, false);
+    
+    // Al primo avvio in assoluto: popoliamo il DB con i default
+    if ($bot_signatures === false) {
+        $bot_signatures = array_filter(array_map('trim', explode("\n", freedomtranslate_get_default_bots_string())));
+        update_option(FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION, $bot_signatures);
+    }
+
+    // Se la lista è un array (anche vuoto se hai cancellato tutto a mano), controlliamo
+    if (is_array($bot_signatures)) {
+        foreach ($bot_signatures as $bot) {
+            $bot = strtolower(trim($bot));
+            if ($bot !== '' && strpos($user_agent, $bot) !== false) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 // ========================================================================
 // 1. CORE & ROUTING LOGIC
@@ -659,7 +693,14 @@ function freedomtranslate_settings_page() {
 
     // --- FORM HANDLERS ---
 
-    if (isset($_POST['freedomtranslate_save_general'])) {
+    if (isset($_POST['freedomtranslate_restore_bots'])) {
+        check_admin_referer('freedomtranslate_save_general', 'freedomtranslate_nonce_general');
+        $default_bots = array_filter(array_map('trim', explode("\n", freedomtranslate_get_default_bots_string())));
+        update_option(FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION, $default_bots);
+        echo '<div class="notice notice-success"><p>Default bot signatures restored successfully.</p></div>';
+    }
+
+    elseif (isset($_POST['freedomtranslate_save_general'])) {
         check_admin_referer('freedomtranslate_save_general', 'freedomtranslate_nonce_general');
         update_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, sanitize_text_field(wp_unslash($_POST['translation_service'])));
         
@@ -687,6 +728,11 @@ function freedomtranslate_settings_page() {
         $ttl = max(0, min(365, absint(wp_unslash($_POST['freedomtranslate_cache_ttl_global']))));
         update_option(FREEDOMTRANSLATE_CACHE_TTL_OPTION, $ttl);
 
+        if (isset($_POST['freedomtranslate_bot_signatures'])) {
+            $bots = array_filter(array_map('trim', preg_split('/\R/', sanitize_textarea_field(wp_unslash($_POST['freedomtranslate_bot_signatures'])))));
+            update_option(FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION, $bots);
+        }
+        
         echo '<div class="notice notice-success"><p>General settings saved.</p></div>';
     }
 
@@ -885,6 +931,26 @@ function freedomtranslate_settings_page() {
                             <td>
                                 <input type="number" id="freedomtranslate_cache_ttl_global" name="freedomtranslate_cache_ttl_global" value="<?php echo esc_attr($global_ttl); ?>" min="0" max="365" style="width: 80px;">
                                 <p class="description">Set to <strong>0</strong> to make cache permanent (it will never expire). Otherwise, set the expiration in days (e.g. 30).</p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <div id="ui_block_security">
+                    <hr>
+                    <h3>Security & Anti-Bot</h3>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row"><label for="freedomtranslate_bot_signatures">Bot / Crawler Signatures</label></th>
+                            <td>
+                                <?php
+                                $saved_bots = get_option(FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION, false);
+                                $display_bots = ($saved_bots === false) ? freedomtranslate_get_default_bots_string() : implode("\n", $saved_bots);
+                                ?>
+                                <textarea id="freedomtranslate_bot_signatures" name="freedomtranslate_bot_signatures" rows="6" cols="50" class="large-text"><?php echo esc_textarea($display_bots); ?></textarea>
+                                <p class="description">List user-agent keywords (one per line) that should <strong>NOT</strong> trigger automatic background translations.</p>
+                                
+                                <button type="submit" name="freedomtranslate_restore_bots" class="button button-secondary" style="margin-top: 10px;" onclick="return confirm('Are you sure you want to overwrite your current list and restore the default bots?');">Restore Default Bots</button>
                             </td>
                         </tr>
                     </table>
