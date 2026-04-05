@@ -9,7 +9,7 @@ License URI: https://www.gnu.org/licenses/gpl-3.0.html
 Plugin URI: https://github.com/OskarCosimo/FreedomTranslate-WP
 Requires at least: 5.0
 Requires PHP: 7.4
-*/ 
+*/
 
 defined('ABSPATH') or die('No script kiddies please!');
 
