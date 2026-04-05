@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + cache, auto-prewarm, and static strings manager.
-Version: 1.5.8
+Version: 1.5.9
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -508,10 +508,16 @@ function freedomtranslate_filter_post_content($content) {
 
     if ($service === 'libretranslate' && $libre_mode === 'async') {
         $cached = get_transient($cache_key);
+
         if ($cached !== false) return do_shortcode($cached);
+
+        if (freedomtranslate_is_bot()) {
+            return $content; 
+        }
 
         $pending_key = 'freedomtranslate_pending_' . md5($cache_key);
         if (!get_transient($pending_key)) {
+
             set_transient($pending_key, '1', 30 * MINUTE_IN_SECONDS);
             wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [
                 $cache_key, $content, $site_lang, $user_lang, $post_id,
