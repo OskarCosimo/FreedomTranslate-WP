@@ -1,7 +1,6 @@
 # Freedom Translate WP
 
-**Translate your WordPress site on-the-fly using LibreTranslate, MarianMT, or Google Translate.**  
-Includes smart caching, multiple translation services, user language selection, HTML-aware translation, and a comprehensive admin interface with loading indicators.
+**Translate your WordPress site on-the-fly using AI (AI/LibreTranslate) or Google Translate.** Includes smart caching, auto-prewarming, static strings management, multiple translation services, user language selection, HTML-aware translation, and a comprehensive tabbed admin interface.
 
 ---
 
@@ -12,12 +11,14 @@ Includes smart caching, multiple translation services, user language selection, 
 - [Installation](#installation)
 - [Usage](#usage)
   - [Embed Language Selector](#embed-language-selector)
+  - [Static Strings (Headers/Footers)](#static-strings-headersfooters)
   - [Language Detection Modes](#language-detection-modes)
   - [Exclude Posts or Pages](#exclude-posts-or-pages)
 - [Admin Panel](#admin-panel)
-  - [Translation Service](#translation-service)
-  - [Language Detection Mode](#language-detection-mode)
-  - [Other Settings](#other-settings)
+  - [General & API](#general--api)
+  - [Languages](#languages)
+  - [Static Strings](#static-strings)
+  - [Tools](#tools)
 - [Supported Languages](#supported-languages)
 - [Google Cloud Setup](#google-cloud-setup)
 - [Notes](#notes)
@@ -31,28 +32,21 @@ Includes smart caching, multiple translation services, user language selection, 
 ## Features
 
 - 🌐 **Real-time translation** of all frontend content (titles, post content, home, etc.)
+- 🚀 **Auto-Translate on Save (Pre-warming)** - Automatically translates and caches posts in the background for all enabled languages the moment you publish or update them.
+- ⚡ **Asynchronous Background Processing** - Zero page-load delays. Translations happen in the background with real-time UI progress banners.
+- 🧩 **Static Strings Manager** - Translate headers, footers, and widgets once, and display them dynamically using the `[ft_string id="..."]` shortcode.
 - 🔄 **Multiple Translation Services**:
-  - **LibreTranslate / MarianMT** - Self-hosted or public server (open-source)
-  - **Google Translate (Free)** - Official Google Translator plugin (translate all page)
+  - **AI / LibreTranslate (Local/Remote)** - Self-hosted or public server (open-source)
+  - **Google Translate (Free)** - Hash-based official Google Translator widget
   - **Google Cloud Translation API** - Official paid service (~$20 per 1M characters)
 - 🎯 **Language Detection Modes**:
   - **Automatic** - Detects initial language from browser settings
   - **Manual** - Admin defines default language
-  - Users can always override and manually select their preferred language
 - ⏳ **Loading Overlay** - Beautiful animated spinner with "Translation loading..." message during language changes
-- 💡 **No need to translate posts manually** or store multiple versions
-- 📦 **Caching system** to avoid repeating translation requests
-- 🌍 **Language selector** via shortcode with mode indicator icons
+- 📦 **Smart Caching system** - Set a custom TTL (days) or set it to `0` for infinite cache.
 - 🛑 **Exclude specific pages or posts** from being translated via a checkbox in the editor
 - 🚫 **Excluded words** - Set words/phrases that should never be translated (brand names, technical terms, etc.)
-- ⚙️ **Admin panel**:
-  - Choose translation service (LibreTranslate, Google Free, or Google Official)
-  - Set language detection mode (Automatic or Manual)
-  - Clear cache with one click
-  - Choose which target languages are allowed
-  - Configure API URLs and keys for each service
-  - Manage excluded words list
-- 🛡️ Flexible hosting - Self-hosted LibreTranslate or cloud services
+- ⚙️ **Tabbed Admin panel** - Clean, modern, and dynamic interface to manage all settings easily.
 
 ---
 
@@ -61,7 +55,7 @@ Includes smart caching, multiple translation services, user language selection, 
 - WordPress 5.x or newer
 - PHP 7.4+
 - **One of the following**:
-  - A local or remote instance of [LibreTranslate](https://github.com/uav4geo/LibreTranslate) (default: `http://localhost:5000`)
+  - A local or remote instance of AI API / [LibreTranslate](https://github.com/uav4geo/LibreTranslate) (default: `http://localhost:5000`)
   - Google Cloud Translation API key (for official Google service)
   - Internet connection (for free Google Translate)
 
@@ -90,26 +84,32 @@ This will render a dropdown with all enabled languages and a mode indicator icon
 - 🌐 = Automatic browser detection
 - 📌 = Manual admin-defined default
 
+### Static Strings (Headers/Footers)
+
+To translate global theme elements that are not part of the standard post content (e.g., Footer credits, Header texts, custom Widgets):
+1. Go to **Settings → FreedomTranslate → Static Strings**.
+2. Add a new string (e.g., ID: `footer_credits`, Text: `All rights reserved`).
+3. The plugin will instantly translate it into all enabled languages.
+4. Use the shortcode inside your theme/widget:
+   ```
+   [ft_string id="footer_credits"]
+   ```
+
 ### Language Detection Modes
 
 **Automatic Mode** 🌐:
 - Initial language is detected from user's browser
 - User can change language anytime via selector
-- Best for international audiences
 
 **Manual Mode** 📌:
 - Admin sets a default language in settings
 - No browser detection
-- User can still change language via selector
-- Best for targeting specific regions
 
 ### Exclude Posts or Pages
 
 When editing a post or page, check the box:
-
-> **"Exclude this page/post from automatic translation"**
-
-in the **FreedomTranslate** meta box in the editor sidebar.
+> **"Exclude this page/post from ALL translations"**
+in the **FreedomTranslate Settings** meta box in the editor sidebar.
 
 ---
 
@@ -118,26 +118,22 @@ in the **FreedomTranslate** meta box in the editor sidebar.
 Navigate to:  
 **WordPress Admin → Settings → FreedomTranslate**
 
-### Translation Service
+The panel is now organized into 4 simple tabs:
 
-Choose between:
+### General & API
+- **Select Engine**: Choose between AI/LibreTranslate, Google Free, or Google Official. UI will dynamically adapt.
+- **API Configuration**: Enter your endpoints and API keys.
+- **Processing Mode**: Choose Async (Background) or Sync (Real-time).
+- **Automation & Cache**: Enable "Auto-Translate on Save" and manage global Cache TTL (set to `0` for permanent cache).
 
-1. **LibreTranslate / MarianMT** - Configure API URL and optional API key
-2. **Google Translate Plugin** - No configuration needed (translate all the page)
-3. **Google Cloud Translation API (Official - Paid)** - Enter your Google Cloud API key
+### Languages
+- Enable or disable specific languages from the available list.
 
-### Language Detection Mode
+### Static Strings
+- Manage and translate custom strings for Headers, Footers, and Widgets.
 
-- **Automatic**: Detects user's browser language automatically
-- **Manual**: Set a default language for all new visitors
-- In both modes, users can manually override via the language selector
-
-### Other Settings
-
-- 🔁 **Clear translation cache** with one click
-- 🌐 **Enable/disable specific languages** from the available list
-- 🚫 **Excluded words** - Words that should never be translated (one per line)
-- ⚙️ **API Configuration** - URLs and keys for each translation service
+### Tools
+- **Clear translation cache**: One-click button to flush all saved translations.
 
 ---
 
@@ -173,7 +169,7 @@ To use the official Google Cloud Translation API (optional):
 2. Enable the **Cloud Translation API**
 3. Set up billing (required for API usage)
 4. Create an API key in **APIs & Services → Credentials**
-5. Enter your API key in **FreedomTranslate Settings → Google Cloud Translation API Configuration**
+5. Enter your API key in **FreedomTranslate Settings → General & API**
 
 **Pricing**: Approximately $20 per 1 million characters translated.
 
@@ -181,35 +177,38 @@ To use the official Google Cloud Translation API (optional):
 
 ## Notes
 
-- **LibreTranslate**: Must be running and reachable at your configured URL (default: `http://localhost:5000/translate`)
-- **Google Free**: Official Google Translator plugin, it translate the whole page without any preprocessing words
-- **Google Official**: Requires billing account, most reliable and fastest option
-- Supports both `text` and `html` formats — this plugin uses HTML-aware mode for accurate frontend rendering
-- Translations are cached using WordPress options to improve performance
-- Cache can be cleared anytime from admin panel
-- User language preference is stored in cookies for 30 days
+- **AI / LibreTranslate**: Must be running and reachable at your configured URL.
+- **Google Free**: Official Google Translator widget, translates the whole page on the client-side.
+- **Google Official**: Requires billing account, most reliable and fastest option.
+- **Auto-Prewarm**: When enabled, post translations are staggered by 10 seconds per language to prevent overloading your local AI server.
+- Translations are cached using WordPress options to improve performance.
+- Cache TTL can be set to `0` to make translations permanent.
 
 ---
 
 ## What's New
-v1.4.5
+
+**v1.5.5**
+- ✨ **Massive UI Overhaul**: Brand new tabbed Admin Panel for better organization and dynamic option loading.
+- 🚀 **Auto-Prewarm on Save**: Automatically translate posts in the background to all enabled languages upon saving.
+- 🧩 **Static Strings Manager**: New tool to translate headers, footers, and widgets once, and render them via `[ft_string]` shortcode.
+- 💾 **Infinite Cache**: Cache TTL can now be set to `0` for permanent translations.
+- 🤖 **AI Modernization**: Replaced legacy MarianMT references with modern AI / LibreTranslate (Local7Remote) support.
+- 🗑️ Removed legacy "chunks" mode. Async background processing is now the standard for large texts.
+
+**v1.4.5**
 - Fixed shortcodes placeholder
   
-v1.4.4
-- ✨ Added Google Translate support (free plugin + official paid API)
-- 🎯 Language detection modes: automatic (browser) or manual (admin-defined)
-- ⏳ Loading overlay with animated spinner during language changes
-- 🌍 All code comments and admin UI translated to English
-- 🐛 Fixed admin options not saving issue
-- 🔧 Improved admin panel organization with visual indicators
-- 🔒 Enhanced security with separate nonce per form section
+**v1.4.4**
+- Added Google Translate support (free plugin + official paid API)
+- Language detection modes: automatic (browser) or manual (admin-defined)
+- Loading overlay with animated spinner during language changes
 
 ---
 
 ## Author
 
-**Freedom**  
-2025 – Licensed under [GPLv3 or later](LICENSE)
+**Freedom** 2025 – Licensed under [GPLv3 or later](LICENSE)
 
 ---
 
@@ -223,3 +222,4 @@ This plugin is released under the GNU GPLv3 license. See [LICENSE](LICENSE) for 
 
 This plugin is not affiliated with or endorsed by LibreTranslate, Google Translate, or their respective developers.  
 "LibreTranslate" and "Google Translate" are used solely to describe the APIs that this plugin can interact with.
+```
