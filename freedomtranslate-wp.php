@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + cache, auto-prewarm, and static strings manager.
-Version: 1.5.9
+Version: 1.6.0
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -600,6 +600,37 @@ add_action('save_post', function($post_id, $post, $update) {
     }
 }, 10, 3);
 
+/**
+ * GARBAGE COLLECTOR
+ */
+add_action('post_updated', function($post_id, $post_after, $post_before) {
+    // Ignoriamo i salvataggi automatici di WordPress e le revisioni
+    if (wp_is_post_revision($post_id) || wp_is_post_autosave($post_id)) return;
+
+    if ($post_before->post_content === $post_after->post_content) return;
+
+    remove_filter('the_content', 'freedomtranslate_filter_post_content');
+    $old_content = apply_filters('the_content', $post_before->post_content);
+    add_filter('the_content', 'freedomtranslate_filter_post_content');
+
+    if (empty(trim($old_content))) return;
+
+    $placeholder = '';
+    $old_content = str_replace('[freedomtranslate_selector]', $placeholder, $old_content);
+
+    $site_lang = substr(get_locale(), 0, 2);
+    $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
+    $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
+
+    foreach ($enabled_langs as $lang) {
+        if ($lang === $site_lang) continue;
+        
+        $old_cache_key = FREEDOMTRANSLATE_CACHE_PREFIX . md5($old_content . $site_lang . $lang . 'html' . $service);
+
+        delete_transient($old_cache_key);
+        delete_transient('freedomtranslate_pending_' . md5($old_cache_key));
+    }
+}, 10, 3);
 
 function freedomtranslate_async_banner_script($cache_key) {
     $ajax_url = admin_url('admin-ajax.php');
@@ -793,6 +824,50 @@ function freedomtranslate_settings_page() {
             unset($strings[$id]);
             update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
             echo '<div class="notice notice-success"><p>String deleted.</p></div>';
+        }
+    }
+
+    if (isset($_POST['freedomtranslate_purge_single'])) {
+        check_admin_referer('freedomtranslate_purge_single', 'freedomtranslate_nonce_single');
+        $input = sanitize_text_field(wp_unslash($_POST['single_post_input']));
+        
+        $post_id = is_numeric($input) ? intval($input) : url_to_postid($input);
+
+        if ($post_id > 0) {
+            $post = get_post($post_id);
+            if ($post) {
+
+                remove_filter('the_content', 'freedomtranslate_filter_post_content');
+                $content = apply_filters('the_content', $post->post_content);
+                add_filter('the_content', 'freedomtranslate_filter_post_content');
+
+                $placeholder = '';
+                $content     = str_replace('[freedomtranslate_selector]', $placeholder, $content);
+
+                $site_lang = substr(get_locale(), 0, 2);
+                $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
+                $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
+
+                $deleted_count = 0;
+
+                foreach ($enabled_langs as $lang) {
+                    if ($lang === $site_lang) continue;
+                    $cache_key = FREEDOMTRANSLATE_CACHE_PREFIX . md5($content . $site_lang . $lang . 'html' . $service);
+                    
+                    if (get_transient($cache_key) !== false) {
+                        delete_transient($cache_key);
+                        $deleted_count++;
+                    }
+
+                    delete_transient('freedomtranslate_pending_' . md5($cache_key));
+                }
+
+                echo '<div class="notice notice-success"><p>Cache cleared successfully for Post: <strong>' . esc_html(get_the_title($post_id)) . '</strong> (' . $deleted_count . ' translations removed).</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Post not found. Please check the URL or ID.</p></div>';
+            }
+        } else {
+            echo '<div class="notice notice-error"><p>Could not find a valid Post ID or URL.</p></div>';
         }
     }
 
@@ -1125,11 +1200,25 @@ function freedomtranslate_settings_page() {
 
         <?php elseif ($active_tab === 'tools'): ?>
             <h3>Cache Management</h3>
-            <form method="post">
-                <?php wp_nonce_field('freedomtranslate_purge_cache', 'freedomtranslate_nonce_cache'); ?>
-                <p>Clear the entire translation cache to force re-translation of all content.</p>
-                <input type="submit" name="freedomtranslate_purge_cache" class="button button-secondary" value="Clear All Cache">
-            </form>
+            
+            <div style="background:#f9f9f9; padding:15px; border:1px solid #ccc; margin-bottom:30px;">
+                <h4>Clear Cache for a Single Post/Page</h4>
+                <p class="description">Enter the <strong>full URL</strong> (or Post ID) of the page you want to clear. The plugin will recalculate the hash and delete its specific translations. The AI will re-translate it automatically on the next visit.</p>
+                <form method="post" style="display:flex; gap:10px; align-items:center; margin-top:10px;">
+                    <?php wp_nonce_field('freedomtranslate_purge_single', 'freedomtranslate_nonce_single'); ?>
+                    <input type="text" name="single_post_input" placeholder="https://yoursite.com/my-post/" class="regular-text" required style="width: 300px;">
+                    <input type="submit" name="freedomtranslate_purge_single" class="button button-primary" value="Clear Single Cache">
+                </form>
+            </div>
+
+            <div style="margin-bottom:30px;">
+                <h4>Clear ALL Cache (Danger Zone)</h4>
+                <p class="description">Clear the entire translation cache to force re-translation of ALL content across the site.</p>
+                <form method="post" onsubmit="return confirm('🚨 WARNING 🚨\n\nClearing the entire cache means the AI will have to re-translate EVERY SINGLE PAGE on your site from scratch!\n\nFor a site with many posts, this can heavily overload your local AI server and cause delays for visitors.\n\nAre you absolutely sure you want to proceed?');">
+                    <?php wp_nonce_field('freedomtranslate_purge_cache', 'freedomtranslate_nonce_cache'); ?>
+                    <input type="submit" name="freedomtranslate_purge_cache" class="button button-secondary" style="border-color: #d63638; color: #d63638;" value="Clear ALL Cache">
+                </form>
+            </div>
         <?php endif; ?>
         
         </div>
