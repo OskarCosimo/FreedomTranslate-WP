@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, auto-prewarm, and static strings manager.
-Version: 1.6.5
+Version: 1.6.6
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -29,6 +29,7 @@ define('FREEDOMTRANSLATE_LIBRE_MODE_OPTION',          'freedomtranslate_libre_mo
 define('FREEDOMTRANSLATE_PREWARM_OPTION',             'freedomtranslate_prewarm_on_save');
 define('FREEDOMTRANSLATE_STATIC_STRINGS_OPTION',      'freedomtranslate_static_strings');
 define('FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION',      'freedomtranslate_bot_signatures');
+define('FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION',      'freedomtranslate_max_concurrent_jobs');
 
 // ========================================================================
 // 1. DATABASE SETUP & CUSTOM CACHE ENGINE
@@ -277,9 +278,6 @@ add_shortcode('ft_string', function($atts) {
 // 4. TRANSLATION APIS & HTML PROTECTION
 // ========================================================================
 
-/**
- * GLOBAL SHORTCODE SHIELD: Find and protect any shortcode before translating
- */
 function freedomtranslate_protect_shortcodes($html) {
     $placeholders = [];
     if (preg_match_all('/\[\/?(?:[a-zA-Z0-9_-]+)(?:\s+[^\]]+)?\]/s', $html, $matches)) {
@@ -447,7 +445,7 @@ function freedomtranslate_async_worker($hash_key, $original_content, $site_lang,
     }
 
     // 2. Split content into manageable chunks
-    $chunks = freedomtranslate_split_html_into_chunks($content_to_process, 3000);
+    $chunks = freedomtranslate_split_html_into_chunks($content_to_process, 1000);
     $total_chunks = count($chunks);
 
     // 3. Track progress using a transient
@@ -457,16 +455,65 @@ function freedomtranslate_async_worker($hash_key, $original_content, $site_lang,
 
     // 4. Process ONE CHUNK at a time to avoid server timeouts
     if ($current_index < $total_chunks) {
+        
+        // --- NEW CONCURRENCY CHECK (Redis-compatible, Database-Ghost Proof) ---
+        $max_concurrent = (int) get_option(FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION, 2);
+        if ($max_concurrent > 0) {
+            $active_jobs = get_option('ft_active_jobs_array', []);
+            if (!is_array($active_jobs)) $active_jobs = [];
+            
+            $now = time();
+            $cleaned_jobs = [];
+            
+            // Pulisce in automatico i vecchi gettoni bloccati (più vecchi di 120 secondi)
+            foreach ($active_jobs as $job_hash => $expires_at) {
+                if ($expires_at > $now) {
+                    $cleaned_jobs[$job_hash] = $expires_at;
+                }
+            }
+
+            // Se il limite è raggiunto, rimettiti in coda e riprova tra 20 secondi
+            if (!isset($cleaned_jobs[$hash_key]) && count($cleaned_jobs) >= $max_concurrent) {
+                update_option('ft_active_jobs_array', $cleaned_jobs);
+                wp_schedule_single_event(time() + 20, 'freedomtranslate_async_translate', [
+                    $hash_key, $original_content, $site_lang, $user_lang, $post_id
+                ]);
+                return;
+            }
+
+            // Acquisisci il gettone di sblocco
+            $cleaned_jobs[$hash_key] = $now + 120;
+            update_option('ft_active_jobs_array', $cleaned_jobs);
+        }
+
+        // --- UX FIX: Mostra SUBITO lo 0% senza dover aspettare la fine della traduzione! ---
+        if ($current_index === 0 && !get_transient($progress_key)) {
+            set_transient($progress_key, array(
+                'done' => 0, 
+                'total' => $total_chunks,
+                'post_id' => $post_id,
+                'lang' => $user_lang
+            ), 12 * HOUR_IN_SECONDS);
+        }
+
         $chunk_to_translate = $chunks[$current_index];
 
         // Call the AI (LibreTranslate/Flask API)
         $translated_chunk = freedomtranslate_translate_libre(
             $chunk_to_translate, $site_lang, $user_lang, 'html'
         );
+        
+        // Rilascia immediatamente il gettone non appena l'API risponde
+        if ($max_concurrent > 0) {
+            $active_jobs = get_option('ft_active_jobs_array', []);
+            if (isset($active_jobs[$hash_key])) {
+                unset($active_jobs[$hash_key]);
+                update_option('ft_active_jobs_array', $active_jobs);
+            }
+        }
 
         // Save the translated chunk to the custom database table (temporary storage)
         $chunk_hash = $hash_key . '_chunk_' . $current_index;
-        // Set a short TTL for these temporary chunks (e.g., 7 days)
         ft_set_cache($chunk_hash, $translated_chunk, $post_id, $user_lang, DAY_IN_SECONDS * 7);
 
         // Update progress in the transient
@@ -478,13 +525,12 @@ function freedomtranslate_async_worker($hash_key, $original_content, $site_lang,
             'lang' => $user_lang
         ), 12 * HOUR_IN_SECONDS);
 
-        // If there are more chunks, SCHEDULE the next WP-Cron job immediately
-        // CRITICAL FIX: Pass $original_content to preserve integrity across loops!
+        // If there are more chunks, SCHEDULE the next WP-Cron job
         if ($current_index < $total_chunks) {
             wp_schedule_single_event(time() + 2, 'freedomtranslate_async_translate', [
                 $hash_key, $original_content, $site_lang, $user_lang, $post_id
             ]);
-            return; // Exit the function to prevent timeout; the next cron job will pick it up
+            return; 
         }
     }
 
@@ -494,41 +540,32 @@ function freedomtranslate_async_worker($hash_key, $original_content, $site_lang,
         $c_hash = $hash_key . '_chunk_' . $i;
         $part = ft_get_cache($c_hash);
         
-        // If a piece is missing (e.g. purged), reset progress and abort to start fresh later.
         if ($part === false) {
             delete_transient($progress_key);
             return; 
         }
-        
         $translated_parts[] = $part;
     }
 
-    // Combine all parts into the final translated content
     $translated_final = implode('', $translated_parts);
 
-    // Restore Shortcodes and Excluded Words
     if (!empty($placeholders)) {
         $translated_final = freedomtranslate_restore_excluded_words_in_html($translated_final, $placeholders);
     }
     $translated_final = freedomtranslate_restore_shortcodes($translated_final, $sc_placeholders);
 
-    // Save the complete, final translation to the custom database table
     ft_set_cache($hash_key, $translated_final, $post_id, $user_lang, DAY_IN_SECONDS * freedomtranslate_get_ttl_days($post_id));
     
-    // --- CLEANUP PHASE ---
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
-    
-    // Remove all temporary chunks for this specific translation job from the database
     $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $hash_key . '_chunk_%'));
 
-    // Mark the translation as complete and clean up transients
     set_transient('freedomtranslate_ready_' . $hash_key, '1', HOUR_IN_SECONDS);
     delete_transient($progress_key);
     delete_transient('freedomtranslate_pending_' . $hash_key);
 }
 
-function freedomtranslate_split_html_into_chunks($html, $max_chars = 3000) {
+function freedomtranslate_split_html_into_chunks($html, $max_chars = 1000) {
     $blocks  = preg_split(
         '/(?=<(?:p|div|h[1-6]|li|blockquote|pre|table|ul|ol|figure|tr|section|article)[\s>])/i',
         $html, -1, PREG_SPLIT_NO_EMPTY
@@ -765,7 +802,7 @@ function freedomtranslate_async_banner_script($hash_key) {
                                 sessionStorage.setItem(sessionFlag, '1');
                                 window.location.reload();
                             }, 2000);
-                        } else if (typeof data.progress !== 'undefined' && data.progress > 0) {
+                        } else if (typeof data.progress !== 'undefined' && data.progress >= 0) {
                             var bns = getBanners();
                             for (var bi = 0; bi < bns.length; bi++) {
                                 var tx = bns[bi].querySelector('.ft-pb-text');
@@ -838,6 +875,9 @@ function freedomtranslate_settings_page() {
 
         $ttl = max(0, min(365, absint(wp_unslash($_POST['freedomtranslate_cache_ttl_global']))));
         update_option(FREEDOMTRANSLATE_CACHE_TTL_OPTION, $ttl);
+
+        $max_concurrent = max(1, min(50, absint(wp_unslash($_POST['freedomtranslate_max_concurrent_jobs']))));
+        update_option(FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION, $max_concurrent);
 
         if (isset($_POST['freedomtranslate_bot_signatures'])) {
             $bots = array_filter(array_map('trim', preg_split('/\R/', sanitize_textarea_field(wp_unslash($_POST['freedomtranslate_bot_signatures'])))));
@@ -915,11 +955,14 @@ function freedomtranslate_settings_page() {
         if ($post_id > 0) {
             $hashes = $wpdb->get_col($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d", $post_id));
             if (!empty($hashes)) {
+                $active_jobs = get_option('ft_active_jobs_array', []);
                 foreach ($hashes as $h) {
                     delete_transient('freedomtranslate_pending_' . $h);
-                    delete_transient('freedomtranslate_progress_' . $h); // CRITICAL FIX: Clears the ghost progress
+                    delete_transient('freedomtranslate_progress_' . $h);
                     delete_transient('freedomtranslate_ready_' . $h);
+                    if (isset($active_jobs[$h])) unset($active_jobs[$h]);
                 }
+                update_option('ft_active_jobs_array', $active_jobs);
             }
             
             $deleted = $wpdb->delete($table, ['post_id' => $post_id]);
@@ -942,15 +985,19 @@ function freedomtranslate_settings_page() {
         $pr = esc_sql('freedomtranslate_progress_');
         $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s", '_transient_' . $p . '%', '_transient_timeout_' . $p . '%', '_transient_' . $pr . '%', '_transient_timeout_' . $pr . '%'));
         
+        delete_option('ft_active_jobs_array');
         echo '<div class="notice notice-success"><p>Entire translation database cache cleared successfully.</p></div>';
     }
 
     if (isset($_POST['freedomtranslate_purge_cron'])) {
         check_admin_referer('freedomtranslate_purge_cron', 'freedomtranslate_nonce_cron');
         wp_clear_scheduled_hook('freedomtranslate_async_translate');
+        
         $p = esc_sql('freedomtranslate_pending_');
         $pr = esc_sql('freedomtranslate_progress_');
         $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s", '_transient_' . $p . '%', '_transient_timeout_' . $p . '%', '_transient_' . $pr . '%', '_transient_timeout_' . $pr . '%'));
+        
+        delete_option('ft_active_jobs_array');
         echo '<div class="notice notice-success"><p>All pending translation jobs and safety padlocks have been cleared.</p></div>';
     }
 
@@ -963,6 +1010,12 @@ function freedomtranslate_settings_page() {
             wp_unschedule_event($timestamp, 'freedomtranslate_async_translate', $args);
             $hash_key = $args[0]; 
             delete_transient('freedomtranslate_pending_' . $hash_key);
+            
+            $active_jobs = get_option('ft_active_jobs_array', []);
+            if (isset($active_jobs[$hash_key])) {
+                unset($active_jobs[$hash_key]);
+                update_option('ft_active_jobs_array', $active_jobs);
+            }
             echo '<div class="notice notice-success"><p>Specific background job cancelled.</p></div>';
         }
     }
@@ -978,6 +1031,7 @@ function freedomtranslate_settings_page() {
     $global_ttl        = get_option(FREEDOMTRANSLATE_CACHE_TTL_OPTION, 30);
     $libre_mode        = get_option(FREEDOMTRANSLATE_LIBRE_MODE_OPTION, 'async');
     $prewarm           = get_option(FREEDOMTRANSLATE_PREWARM_OPTION, '0');
+    $max_concurrent    = get_option(FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION, 2);
     $static_strings    = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
     $active_tab        = isset($_GET['tab']) ? sanitize_text_field($_GET['tab']) : 'general';
     ?>
@@ -1070,6 +1124,13 @@ function freedomtranslate_settings_page() {
                             <td>
                                 <input type="number" id="freedomtranslate_cache_ttl_global" name="freedomtranslate_cache_ttl_global" value="<?php echo esc_attr($global_ttl); ?>" min="0" max="365" style="width: 80px;">
                                 <p class="description">Set to <strong>0</strong> to make cache permanent (it will never expire). Otherwise, set the expiration in days (e.g. 30).</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="freedomtranslate_max_concurrent_jobs">Max Concurrent Translations</label></th>
+                            <td>
+                                <input type="number" id="freedomtranslate_max_concurrent_jobs" name="freedomtranslate_max_concurrent_jobs" value="<?php echo esc_attr($max_concurrent); ?>" min="1" max="50" style="width: 80px;">
+                                <p class="description">Limit simultaneous background AI translation jobs. Local LLMs (like Ollama on Mac Mini) perform best with <strong>1 or 2</strong> concurrent jobs to prevent RAM exhaustion and slowdowns.</p>
                             </td>
                         </tr>
                     </table>
@@ -1211,7 +1272,6 @@ function freedomtranslate_settings_page() {
                 global $wpdb;
                 $active_hashes = [];
 
-                // 1. Peschiamo gli hash attivi dalla coda WP-Cron (Infallibile anche con Redis)
                 $crons = _get_cron_array();
                 if (!empty($crons)) {
                     foreach ($crons as $cron_hooks) {
@@ -1225,7 +1285,6 @@ function freedomtranslate_settings_page() {
                     }
                 }
 
-                // 2. Peschiamo gli hash dalle porzioni temporanee salvate nella tabella custom
                 $table = $wpdb->prefix . 'freedomtranslate_cache';
                 $chunk_rows = $wpdb->get_results("SELECT hash_key FROM $table WHERE hash_key LIKE '%_chunk_%'");
                 if (!empty($chunk_rows)) {
@@ -1235,7 +1294,6 @@ function freedomtranslate_settings_page() {
                     }
                 }
 
-                // 3. Fallback: Query diretta (Per chi non usa sistemi di Object Cache)
                 $progress_options = $wpdb->get_results("SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE '_transient_freedomtranslate_progress_%'");
                 if (!empty($progress_options)) {
                     foreach ($progress_options as $opt) {
@@ -1246,7 +1304,6 @@ function freedomtranslate_settings_page() {
 
                 $active_translations = [];
                 
-                // CRITICAL FIX: Interroghiamo la RAM (get_transient) per ogni hash scoperto!
                 foreach (array_keys($active_hashes) as $hash) {
                     $data = get_transient('freedomtranslate_progress_' . $hash);
                     if (is_array($data) && isset($data['total']) && $data['total'] > 0) {
@@ -1497,7 +1554,7 @@ add_action('save_post', function($post_id) {
     else delete_post_meta($post_id, '_freedomtranslate_exclude');
 });
 
-// Auto-purge cron per la tabella custom
+// Auto-purge
 register_activation_hook(__FILE__, function() {
     if (!wp_next_scheduled('freedomtranslate_auto_purge')) wp_schedule_event(time(), 'daily', 'freedomtranslate_auto_purge');
 });
