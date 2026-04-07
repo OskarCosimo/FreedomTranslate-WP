@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, auto-prewarm, and static strings manager.
-Version: 1.6.1
+Version: 1.6.4
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -52,7 +52,6 @@ function freedomtranslate_install_db() {
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
     dbDelta($sql);
 }
-// Hook activation to create the database table
 register_activation_hook(__FILE__, 'freedomtranslate_install_db');
 add_action('admin_init', function() {
     if (get_option('freedomtranslate_db_version') !== '1.1') {
@@ -92,7 +91,6 @@ function ft_set_cache($hash_key, $translation, $post_id, $target_lang, $ttl_seco
         'expires_at'  => $expires
     ], ['%s', '%d', '%s', '%s', '%s']);
 }
-
 
 function freedomtranslate_get_default_bots_string() {
     return "googlebot\nbingbot\nyandex\nduckduckbot\nslurp\nbaiduspider\nia_archiver\ntwitterbot\nfacebookexternalhit\nrogerbot\nlinkedinbot\nembedly\nquora link preview\nshowyoubot\noutbrain\npinterest\nslackbot\nvkshare\nw3c_validator\nsemrushbot\nahrefsbot\nmj12bot\ndotbot\npetalbot\nseznambot\nbot\nspider\ncrawl\nscraper";
@@ -279,6 +277,30 @@ add_shortcode('ft_string', function($atts) {
 // 4. TRANSLATION APIS & HTML PROTECTION
 // ========================================================================
 
+/**
+ * SCUDO GLOBALE SHORTCODE: Trova e protegge qualsiasi shortcode prima di tradurre
+ */
+function freedomtranslate_protect_shortcodes($html) {
+    $placeholders = [];
+    if (preg_match_all('/\[\/?(?:[a-zA-Z0-9_-]+)(?:\s+[^\]]+)?\]/s', $html, $matches)) {
+        $count = 0;
+        foreach ($matches[0] as $match) {
+            $ph = '<ftshortcode id="' . $count . '"></ftshortcode>';
+            $placeholders[$ph] = $match;
+            $html = preg_replace('/' . preg_quote($match, '/') . '/', $ph, $html, 1);
+            $count++;
+        }
+    }
+    return [$html, $placeholders];
+}
+
+function freedomtranslate_restore_shortcodes($html, $placeholders) {
+    foreach ($placeholders as $ph => $original) {
+        $html = str_replace($ph, $original, $html);
+    }
+    return $html;
+}
+
 function freedomtranslate_translate_google_official($text, $source, $target, $format = 'text') {
     $api_key = get_option(FREEDOMTRANSLATE_GOOGLE_API_KEY_OPTION, '');
     if (empty($api_key)) return $text;
@@ -341,57 +363,6 @@ function freedomtranslate_restore_excluded_words_in_html($text, $placeholders) {
     return $text;
 }
 
-function freedomtranslate_translate_html_by_nodes($html, $source, $target, $api_url, $api_key) {
-    $parts = preg_split('/(<[^>]+>)/s', $html, -1, PREG_SPLIT_DELIM_CAPTURE);
-    if ($parts === false) return $html;
-
-    $skip_depth = 0;
-    $result     = array();
-
-    foreach ($parts as $part) {
-        if (isset($part[0]) && $part[0] === '<') {
-            $result[] = $part;
-            $tag_name = '';
-            if (preg_match('/<\/?([a-zA-Z][a-zA-Z0-9]*)/', $part, $tm)) {
-                $tag_name = strtolower($tm[1]);
-            }
-            if (in_array($tag_name, array('script', 'style'), true)) {
-                if ($part[1] === '/') $skip_depth = max(0, $skip_depth - 1);
-                else $skip_depth++;
-            }
-            continue;
-        }
-
-        if ($skip_depth > 0 || trim($part) === '') {
-            $result[] = $part;
-            continue;
-        }
-
-        preg_match('/^(\s*)/', $part, $lm);
-        preg_match('/(\s*)$/', $part, $tm);
-        $leading  = isset($lm[1]) ? $lm[1] : '';
-        $trailing = isset($tm[1]) ? $tm[1] : '';
-        $trimmed  = trim($part);
-
-        if ($trimmed === '' || !preg_match('/\p{L}/u', $trimmed)) { $result[] = $part; continue; }
-
-        $body = ['q' => $trimmed, 'source' => $source, 'target' => $target, 'format' => 'text'];
-        if (!empty($api_key)) $body['api_key'] = $api_key;
-
-        $response = wp_remote_post($api_url, ['body' => $body, 'timeout' => 900]);
-        if (is_wp_error($response)) { $result[] = $part; continue; }
-
-        $json = json_decode(wp_remote_retrieve_body($response), true);
-        if (isset($json['translatedText'])) {
-            $result[] = $leading . $json['translatedText'] . $trailing;
-        } else {
-            $result[] = $part;
-        }
-    }
-
-    return implode('', $result);
-}
-
 function freedomtranslate_get_ttl_days($post_id = 0) {
     if ($post_id > 0) {
         $post_ttl = get_post_meta($post_id, '_freedomtranslate_cache_ttl', true);
@@ -408,6 +379,11 @@ function freedomtranslate_get_ttl_days($post_id = 0) {
 function freedomtranslate_translate($text, $source, $target, $format = 'text', $post_id = 0) {
     if (!function_exists('wp_remote_post')) return $text;
     if (trim($text) === '' || $source === $target || !freedomtranslate_is_language_enabled($target)) return $text;
+
+    $sc_placeholders = [];
+    if ($format === 'html') {
+        list($text, $sc_placeholders) = freedomtranslate_protect_shortcodes($text);
+    }
 
     $excluded_words = get_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, []);
     if ($format === 'html' && !empty($excluded_words)) {
@@ -440,6 +416,10 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text', $
     if (!empty($placeholders)) {
         $translated = freedomtranslate_restore_excluded_words_in_html($translated, $placeholders);
     }
+    if (!empty($sc_placeholders)) {
+        $translated = freedomtranslate_restore_shortcodes($translated, $sc_placeholders);
+    }
+
     ft_set_cache($hash_key, $translated, $post_id, $target, DAY_IN_SECONDS * freedomtranslate_get_ttl_days($post_id));
     return $translated;
 }
@@ -449,8 +429,8 @@ function freedomtranslate_async_worker($hash_key, $content, $site_lang, $user_la
     ignore_user_abort(true);
     if (ft_get_cache($hash_key) !== false) return;
 
-    $placeholder = '';
-    $content     = str_replace('[freedomtranslate_selector]', $placeholder, $content);
+    // Protezione Shortcode (Tutti i tipi)
+    list($content, $sc_placeholders) = freedomtranslate_protect_shortcodes($content);
 
     $excluded_words = get_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, []);
     $placeholders   = [];
@@ -466,8 +446,8 @@ function freedomtranslate_async_worker($hash_key, $content, $site_lang, $user_la
     $translated_parts = array();
 
     foreach ($chunks as $i => $chunk) {
-        $translated_parts[] = freedomtranslate_translate_html_by_nodes(
-            $chunk, $site_lang, $user_lang, $api_url, $api_key
+        $translated_parts[] = freedomtranslate_translate_libre(
+            $chunk, $site_lang, $user_lang, 'html'
         );
         set_transient(
             'freedomtranslate_progress_' . $hash_key,
@@ -481,8 +461,9 @@ function freedomtranslate_async_worker($hash_key, $content, $site_lang, $user_la
     if (!empty($placeholders)) {
         $translated = freedomtranslate_restore_excluded_words_in_html($translated, $placeholders);
     }
-
-    $translated = str_replace($placeholder, '[freedomtranslate_selector]', $translated);
+    
+    // Ripristino Shortcode
+    $translated = freedomtranslate_restore_shortcodes($translated, $sc_placeholders);
 
     ft_set_cache($hash_key, $translated, $post_id, $user_lang, DAY_IN_SECONDS * freedomtranslate_get_ttl_days($post_id));
     
@@ -579,10 +560,7 @@ function freedomtranslate_filter_post_content($content) {
         return $content;
     }
 
-    $placeholder = '';
-    $content     = str_replace('[freedomtranslate_selector]', $placeholder, $content);
-    $translated  = freedomtranslate_translate($content, $site_lang, $user_lang, 'html', $post_id);
-    $translated  = str_replace($placeholder, '[freedomtranslate_selector]', $translated);
+    $translated = freedomtranslate_translate($content, $site_lang, $user_lang, 'html', $post_id);
     return do_shortcode($translated);
 }
 add_filter('the_content', 'freedomtranslate_filter_post_content');
@@ -610,16 +588,21 @@ add_filter('the_content', function($content) {
 /**
  * AUTO-PREWARM ON SAVE
  */
+/**
+ * AUTO-PREWARM ON SAVE
+ */
 add_action('save_post', function($post_id, $post, $update) {
     if (wp_is_post_revision($post_id) || wp_is_post_autosave($post_id)) return;
     if (get_option(FREEDOMTRANSLATE_PREWARM_OPTION, '0') !== '1') return;
     if (get_post_meta($post_id, '_freedomtranslate_exclude', true) === '1') return;
     if ($post->post_status !== 'publish') return;
 
-    if (!isset($_POST['action']) || $_POST['action'] !== 'editpost') return;
-    if (!isset($_POST['post_title'])) return;
 
-    $content = apply_filters('the_content', $post->post_content);
+    $content = $post->post_content;
+    if (function_exists('do_blocks')) {
+        $content = do_blocks($content);
+    }
+    
     if (empty(trim($content))) return;
 
     $site_lang = substr(get_locale(), 0, 2);
@@ -635,7 +618,6 @@ add_action('save_post', function($post_id, $post, $update) {
         $hash_key = md5($content . $site_lang . $lang . 'html' . $service);
         $pending_key = 'freedomtranslate_pending_' . $hash_key;
         
-        // Se c'è già in cache custom o è lockato
         if (ft_get_cache($hash_key) !== false || get_transient($pending_key) !== false) continue;
 
         set_transient($pending_key, '1', 30 * MINUTE_IN_SECONDS);
@@ -657,7 +639,6 @@ add_action('post_updated', function($post_id, $post_after, $post_before) {
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
     
-    // Troviamo i lock pending e li rompiamo
     $hashes = $wpdb->get_col($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d", $post_id));
     if (!empty($hashes)) {
         foreach ($hashes as $h) {
@@ -666,7 +647,6 @@ add_action('post_updated', function($post_id, $post_after, $post_before) {
     }
     
     $wpdb->delete($table, ['post_id' => $post_id]);
-
 }, 10, 3);
 
 function freedomtranslate_async_banner_script($hash_key) {
@@ -809,6 +789,11 @@ function freedomtranslate_settings_page() {
             $bots = array_filter(array_map('trim', preg_split('/\R/', sanitize_textarea_field(wp_unslash($_POST['freedomtranslate_bot_signatures'])))));
             update_option(FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION, $bots);
         }
+
+        if (isset($_POST['freedomtranslate_words_exclude'])) {
+            $words = array_filter(array_map('trim', preg_split('/\R/', sanitize_textarea_field(wp_unslash($_POST['freedomtranslate_words_exclude'])))));
+            update_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, $words);
+        }
         
         echo '<div class="notice notice-success"><p>General settings saved.</p></div>';
     }
@@ -874,7 +859,6 @@ function freedomtranslate_settings_page() {
         $post_id = is_numeric($input) ? intval($input) : url_to_postid($input);
 
         if ($post_id > 0) {
-            // Eliminiamo eventuali lock
             $hashes = $wpdb->get_col($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d", $post_id));
             if (!empty($hashes)) {
                 foreach ($hashes as $h) {
@@ -882,7 +866,6 @@ function freedomtranslate_settings_page() {
                 }
             }
             
-            // Eliminiamo i record
             $deleted = $wpdb->delete($table, ['post_id' => $post_id]);
             if ($deleted) {
                 echo '<div class="notice notice-success"><p>Cache cleared successfully for Post ID: <strong>' . esc_html($post_id) . '</strong> (' . $deleted . ' translations removed).</p></div>';
@@ -897,17 +880,14 @@ function freedomtranslate_settings_page() {
     if (isset($_POST['freedomtranslate_purge_cache'])) {
         check_admin_referer('freedomtranslate_purge_cache', 'freedomtranslate_nonce_cache');
         
-        // Svuotiamo la tabella custom
         $wpdb->query("TRUNCATE TABLE $table");
         
-        // Svuotiamo i lock rimasti nei transients nativi di WP
         $p = esc_sql('freedomtranslate_pending_');
         $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s", '_transient_' . $p . '%', '_transient_timeout_' . $p . '%'));
         
         echo '<div class="notice notice-success"><p>Entire translation database cache cleared successfully.</p></div>';
     }
 
-    // Purge ALL Crons
     if (isset($_POST['freedomtranslate_purge_cron'])) {
         check_admin_referer('freedomtranslate_purge_cron', 'freedomtranslate_nonce_cron');
         wp_clear_scheduled_hook('freedomtranslate_async_translate');
@@ -916,7 +896,6 @@ function freedomtranslate_settings_page() {
         echo '<div class="notice notice-success"><p>All pending translation jobs and safety padlocks have been cleared.</p></div>';
     }
 
-    // Delete SINGLE Cron
     if (isset($_POST['freedomtranslate_delete_single_cron'])) {
         check_admin_referer('freedomtranslate_delete_single_cron', 'freedomtranslate_nonce_single_cron');
         $timestamp = intval($_POST['cron_timestamp']);
@@ -1040,8 +1019,16 @@ function freedomtranslate_settings_page() {
                 
                 <div id="ui_block_security">
                     <hr>
-                    <h3>Security & Anti-Bot</h3>
+                    <h3>Security, Content Protection & Anti-Bot</h3>
                     <table class="form-table">
+                        <tr>
+                            <th scope="row"><label for="freedomtranslate_words_exclude">Excluded Words</label></th>
+                            <td>
+                                <?php $excluded = get_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, []); ?>
+                                <textarea id="freedomtranslate_words_exclude" name="freedomtranslate_words_exclude" rows="4" cols="50" class="large-text"><?php echo esc_textarea(implode("\n", $excluded)); ?></textarea>
+                                <p class="description">List words or brand names (one per line) that should <strong>NEVER</strong> be translated (e.g., your company name, technical terms).</p>
+                            </td>
+                        </tr>
                         <tr>
                             <th scope="row"><label for="freedomtranslate_bot_signatures">Bot / Crawler Signatures</label></th>
                             <td>
@@ -1256,13 +1243,13 @@ function freedomtranslate_settings_page() {
                     <p style="margin:0;"><strong>The custom translation database is currently empty.</strong> Visit a page or use auto-prewarm to start caching.</p>
                 </div>
             <?php else: ?>
-                <table class="wp-list-table widefat fixed striped" style="margin-top: 15px;">
+                <table id="ft-registry-table" class="wp-list-table widefat fixed striped" style="width:100%; margin-top: 15px;">
                     <thead>
                         <tr>
                             <th>Post ID</th>
                             <th>Title</th>
                             <th>Cached Languages</th>
-                            <th>Action</th>
+                            <th style="width: 100px;">Action</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1285,6 +1272,24 @@ function freedomtranslate_settings_page() {
                         <?php endforeach; ?>
                     </tbody>
                 </table>
+
+                <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
+                <style>
+                    #ft-registry-table_wrapper { margin-top: 20px; }
+                    #ft-registry-table_wrapper .dataTables_filter input { margin-bottom: 10px; padding: 3px 8px; }
+                </style>
+                <script type="text/javascript" src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+                <script>
+                jQuery(document).ready(function($) {
+                    $('#ft-registry-table').DataTable({
+                        "pageLength": 10,
+                        "order": [[ 0, "desc" ]],
+                        "language": {
+                            "search": "Search in translated posts:"
+                        }
+                    });
+                });
+                </script>
             <?php endif; ?>
 
         <?php endif; ?>
@@ -1303,6 +1308,7 @@ add_action('save_post', function($post_id) {
     else delete_post_meta($post_id, '_freedomtranslate_exclude');
 });
 
+// Auto-purge cron per la tabella custom
 register_activation_hook(__FILE__, function() {
     if (!wp_next_scheduled('freedomtranslate_auto_purge')) wp_schedule_event(time(), 'daily', 'freedomtranslate_auto_purge');
 });
