@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.8.0
+Version: 1.8.1
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -86,7 +86,7 @@ function ft_get_cache($hash_key) {
     $row = $wpdb->get_row($wpdb->prepare("SELECT translation, expires_at FROM $table WHERE hash_key = %s", $hash_key));
     
     if ($row) {
-        if ($row->expires_at && strtotime($row->expires_at) < time()) {
+        if ($row->expires_at && strtotime($row->expires_at . ' UTC') < time()) {
             return false; // Expired
         }
         return $row->translation;
@@ -94,20 +94,20 @@ function ft_get_cache($hash_key) {
     return false;
 }
 
-function ft_set_cache($hash_key, $translation, $post_id, $target_lang, $ttl_seconds) {
+function ft_set_cache($hash_key, $translation, $post_id, $target_lang, $ttl_seconds, $status = 'completed') {
+    if ($status === 'completed' && trim($translation) === '') return;
+
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
     $expires = null;
-    
-    if ($ttl_seconds > 0) {
-        $expires = gmdate('Y-m-d H:i:s', time() + $ttl_seconds);
-    }
+    if ($ttl_seconds > 0) $expires = gmdate('Y-m-d H:i:s', time() + $ttl_seconds);
     
     $wpdb->replace($table, [
         'hash_key'    => $hash_key,
         'post_id'     => $post_id,
         'target_lang' => $target_lang,
         'translation' => $translation,
+        'status'      => $status,
         'expires_at'  => $expires
     ], ['%s', '%d', '%s', '%s', '%s']);
 }
@@ -194,7 +194,10 @@ function freedomtranslate_get_all_languages() {
 // 3. SHORTCODES
 // ========================================================================
 
-function freedomtranslate_language_selector_shortcode() {
+function freedomtranslate_language_selector_shortcode($atts) {
+    $atts = shortcode_atts(['post_id' => get_the_ID()], $atts, 'freedomtranslate_selector');
+    $post_id = (int)$atts['post_id'];
+    
     $all            = freedomtranslate_get_all_languages();
     $enabled        = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, array_keys($all));
     $current        = freedomtranslate_get_user_lang();
@@ -253,13 +256,21 @@ function freedomtranslate_language_selector_shortcode() {
     }
     </script>';
 
-    global $freedomtranslate_active_hash_key;
-    if (!empty($freedomtranslate_active_hash_key)) {
-        $ck = esc_attr($freedomtranslate_active_hash_key);
-        $html .= '<div class="ft-progress-banner ft-pb-visible" data-cache-key="' . $ck . '">'
-               . '<div class="ft-pb-spinner"></div>'
-               . '<span class="ft-pb-text">Translation in progress...</span>'
-               . '</div>';
+    if ($post_id > 0) {
+        $content_hash = md5("post_{$post_id}_the_content_{$current}") . '_the_content';
+        $status_data = ft_get_status_db($content_hash);
+        
+        if ($status_data && $status_data->status !== 'completed') {
+            $ck = esc_attr($content_hash);
+            $html .= '<div class="ft-progress-banner ft-pb-visible" data-cache-key="' . $ck . '">'
+                   . '<div class="ft-pb-spinner"></div>'
+                   . '<span class="ft-pb-text">Translation in progress...</span>'
+                   . '</div>';
+
+            add_action('wp_footer', function() use ($content_hash) {
+                freedomtranslate_async_banner_script($content_hash);
+            });
+        }
     }
 
     return $html;
@@ -471,33 +482,54 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         ft_update_progress($hash_key, $post_id, $user_lang, 0, 'processing');
     }
 
-    if (strpos($hash_key, '_the_title') !== false) {
+    if ($post->post_type === 'nav_menu_item') {
         $source_text = $post->post_title;
-    } elseif (strpos($hash_key, '_the_excerpt') !== false) {
+
+        if (empty(trim($source_text))) {
+            $menu_item_type = get_post_meta($post_id, '_menu_item_type', true);
+            $object_id      = get_post_meta($post_id, '_menu_item_object_id', true);
+            
+            if ($menu_item_type === 'post_type' && $object_id) {
+                $source_text = get_the_title($object_id);
+            } elseif ($menu_item_type === 'taxonomy' && $object_id) {
+                $term = get_term($object_id);
+                if ($term && !is_wp_error($term)) $source_text = $term->name;
+            }
+        }
+    } elseif (strpos($hash_key, 'title') !== false) { 
+        $source_text = $post->post_title;
+    } elseif (strpos($hash_key, 'excerpt') !== false) {
         $source_text = $post->post_excerpt;
-        if (empty($source_text)) $source_text = wp_trim_excerpt('', $post); 
+        if (empty(trim($source_text))) $source_text = wp_trim_excerpt('', $post); 
     } else {
         $source_text = $post->post_content;
     }
 
     list($protected_text, $sc_placeholders) = freedomtranslate_protect_shortcodes($source_text);
-    $chunks = freedomtranslate_split_html_into_chunks($protected_text, 1000);
+    $chunks = freedomtranslate_split_html_into_chunks($protected_text, 500);
     $total_chunks = count($chunks);
 
     $current_status = ft_get_status_db($hash_key);
     $done_chunks = ($current_status && $current_status->status === 'processing') ? (int) $current_status->progress : 0;
 
-    if ($done_chunks < $total_chunks) {
+    $start_time = time();
+    $max_execution_time = 90;
+
+    while ($done_chunks < $total_chunks) {
+        if (get_transient('ft_kill_switch')) return; 
+
         $translated_chunk = freedomtranslate_translate_libre($chunks[$done_chunks], $site_lang, $user_lang, 'html');
         
         $chunk_hash = $hash_key . '_chunk_' . $done_chunks;
-        ft_set_cache($chunk_hash, $translated_chunk, $post_id, $user_lang, HOUR_IN_SECONDS);
+        ft_set_cache($chunk_hash, $translated_chunk, $post_id, $user_lang, HOUR_IN_SECONDS, 'chunk_temp');
 
-        $new_progress = $done_chunks + 1;
-        ft_update_progress($hash_key, $post_id, $user_lang, $new_progress, 'processing');
+        $done_chunks++;
+        ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'processing');
 
-        wp_schedule_single_event(time() + 1, 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id]);
-        return; 
+        if ($done_chunks < $total_chunks && (time() - $start_time) >= $max_execution_time) {
+            wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id]);
+            return; 
+        }
     }
 
     $final_content = '';
@@ -525,7 +557,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     delete_option('ft_job_' . $hash_key);
 }
 
-function freedomtranslate_split_html_into_chunks($html, $max_chars = 1000) {
+function freedomtranslate_split_html_into_chunks($html, $max_chars = 500) {
     $blocks  = preg_split(
         '/(?=<(?:p|div|h[1-6]|li|blockquote|pre|table|ul|ol|figure|tr|section|article)[\s>])/i',
         $html, -1, PREG_SPLIT_NO_EMPTY
@@ -569,8 +601,8 @@ function freedomtranslate_filter_post_content($content, $id = null) {
     if (function_exists('wp_is_json_request') && wp_is_json_request()) return $content;
     if (!is_string($content) || trim($content) === '') return $content;
 
-    global $post;
-    $current_obj_id = ($id !== null && is_numeric($id)) ? (int)$id : (isset($post->ID) ? $post->ID : 0);
+    $current_obj_id = ($id !== null && is_numeric($id)) ? (int)$id : (int)get_the_ID();
+    if (!$current_obj_id) return $content;
 
     if (is_main_query() && is_home() && $current_obj_id === get_the_ID()) {
          return $content;
@@ -586,7 +618,6 @@ function freedomtranslate_filter_post_content($content, $id = null) {
     $active_hash = md5("post_{$current_obj_id}_{$filter_name}_{$user_lang}") . '_' . $filter_name;
 
     if (get_option(FREEDOMTRANSLATE_LIBRE_MODE_OPTION) === 'async' && $service === 'libretranslate') {
-
         $status_data = ft_get_status_db($active_hash);
 
         if ($status_data && $status_data->status === 'completed') {
@@ -598,18 +629,11 @@ function freedomtranslate_filter_post_content($content, $id = null) {
 
         if (!$status_data) {
             ft_update_progress($active_hash, $current_obj_id, $user_lang, 0, 'pending');
-            
             wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [
                 $active_hash, $site_lang, $user_lang, $current_obj_id
             ]);
         }
 
-        global $freedomtranslate_active_hash_key;
-        $freedomtranslate_active_hash_key = $active_hash;
-        add_action('wp_footer', function() use ($active_hash) {
-            freedomtranslate_async_banner_script($active_hash);
-        });
-        
         return $content;
     }
 
@@ -628,14 +652,14 @@ function freedomtranslate_auto_inject_selector($content) {
     if (!$post_id) return $content;
 
     if (get_post_meta($post_id, '_freedomtranslate_inject_selector', true) === '1') {
-        return '[freedomtranslate_selector]' . $content;
+        return '[freedomtranslate_selector post_id="' . $post_id . '"]' . $content;
     }
 
     $auto_inject = get_option(FREEDOMTRANSLATE_AUTO_INJECT_OPTION, array());
     if (empty($auto_inject)) return $content;
 
     if (in_array(get_post_type(), $auto_inject, true)) {
-        return '[freedomtranslate_selector]' . $content;
+        return '[freedomtranslate_selector post_id="' . $post_id . '"]' . $content;
     }
 
     return $content;
@@ -768,9 +792,9 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
             case 'post_id':
                 return '<strong>' . esc_html($item['post_id']) . '</strong>';
             case 'title':
-                return '<a href="' . get_edit_post_link($item['post_id']) . '" target="_blank">' . esc_html($item['title']) . '</a>';
+                return '<a href="' . get_permalink($item['post_id']) . '" target="_blank">' . esc_html($item['title']) . '</a>';
             case 'langs':
-                return esc_html(strtoupper($item['langs']));
+                return wp_kses_post($item['langs']);
             case 'action':
                 $nonce = wp_create_nonce('freedomtranslate_purge_single');
                 return '<form method="post" onsubmit="return confirm(\'Are you sure you want to delete the cache for this post?\');" style="margin:0;">
@@ -811,16 +835,20 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
             SELECT COUNT(DISTINCT c.post_id) 
             FROM $table c
             LEFT JOIN $posts_table p ON c.post_id = p.ID
-            WHERE c.post_id > 0 AND c.status = 'completed' $search_condition
+            WHERE c.post_id > 0 AND c.status = 'completed' AND c.hash_key NOT LIKE '%_chunk_%' $search_condition
         ");
 
         $offset = ($current_page - 1) * $per_page;
         
         $results = $wpdb->get_results("
-            SELECT c.post_id, GROUP_CONCAT(DISTINCT c.target_lang ORDER BY c.target_lang ASC SEPARATOR ', ') as langs, p.post_title
+            SELECT 
+                c.post_id, 
+                p.post_title,
+                GROUP_CONCAT(DISTINCT IF(c.hash_key LIKE '%_the_title', c.target_lang, NULL) ORDER BY c.target_lang ASC SEPARATOR ', ') as title_langs,
+                GROUP_CONCAT(DISTINCT IF(c.hash_key LIKE '%_the_content', c.target_lang, NULL) ORDER BY c.target_lang ASC SEPARATOR ', ') as content_langs
             FROM $table c
             LEFT JOIN $posts_table p ON c.post_id = p.ID
-            WHERE c.post_id > 0 AND c.status = 'completed' $search_condition
+            WHERE c.post_id > 0 AND c.status = 'completed' AND c.hash_key NOT LIKE '%_chunk_%' $search_condition
             GROUP BY c.post_id 
             ORDER BY $orderby $order 
             LIMIT $offset, $per_page
@@ -829,10 +857,23 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
         $data = [];
         foreach ($results as $row) {
             $title = !empty($row->post_title) ? $row->post_title : '(No Title / Deleted Post)';
+            
+            // Costruiamo la stringa visiva per la colonna "Cached Languages"
+            $formatted_langs = '';
+            if (!empty($row->title_langs)) {
+                $formatted_langs .= '<div style="margin-bottom: 4px;"><span style="color: #646970; font-size: 11px; text-transform: uppercase; margin-right: 4px;">Title:</span><strong>' . strtoupper($row->title_langs) . '</strong></div>';
+            }
+            if (!empty($row->content_langs)) {
+                $formatted_langs .= '<div><span style="color: #646970; font-size: 11px; text-transform: uppercase; margin-right: 4px;">Content:</span><strong>' . strtoupper($row->content_langs) . '</strong></div>';
+            }
+            if (empty($formatted_langs)) {
+                $formatted_langs = '-';
+            }
+
             $data[] = [
                 'post_id' => $row->post_id,
                 'title'   => $title,
-                'langs'   => $row->langs
+                'langs'   => $formatted_langs
             ];
         }
 
