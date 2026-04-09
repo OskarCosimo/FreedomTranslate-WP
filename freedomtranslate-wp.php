@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.8.1
+Version: 1.8.2
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -340,7 +340,7 @@ function freedomtranslate_translate_libre($text, $source, $target, $format = 'te
     $body = ['q'=>$text,'source'=>$source,'target'=>$target,'format'=>$format];
     if (!empty($api_key)) $body['api_key'] = $api_key;
     
-    $response = wp_remote_post($api_url, ['body'=>$body,'timeout'=>900]);
+    $response = wp_remote_post($api_url, ['body'=>$body,'timeout'=>90]);
     if (is_wp_error($response)) return $text;
     
     $json = json_decode(wp_remote_retrieve_body($response), true);
@@ -475,7 +475,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         $active_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table WHERE status = 'processing'");
         
         if ($active_count >= $max_concurrent) {
-            wp_schedule_single_event(time() + rand(30, 60), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id]);
+            wp_schedule_single_event(time() + rand(300, 600), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id]);
             return;
         }
 
@@ -1742,6 +1742,9 @@ add_action('freedomtranslate_auto_purge', function() {
     
     // clean only custom db table
     $wpdb->query("DELETE FROM $table WHERE expires_at IS NOT NULL AND expires_at < NOW()");
+    
+    // zombie translation go back to pending
+    $wpdb->query("UPDATE $table SET status = 'pending', progress = 0 WHERE status = 'processing'");
 });
 
 // Google Hash JS injection
