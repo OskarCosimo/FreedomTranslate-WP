@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.8.3
+Version: 1.8.4
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -476,7 +476,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         $active_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table WHERE status = 'processing'");
         
         if ($active_count >= $max_concurrent) {
-            wp_schedule_single_event(time() + rand(300, 600), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id]);
+            wp_schedule_single_event(time() + rand(300, 600), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, wp_rand()]);
             return;
         }
 
@@ -529,7 +529,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'processing');
 
         if ($done_chunks < $total_chunks && (time() - $start_time) >= $max_execution_time) {
-            wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id]);
+            wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, wp_rand()]);
             return; 
         }
     }
@@ -798,12 +798,8 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
             case 'langs':
                 return wp_kses_post($item['langs']);
             case 'action':
-                $nonce = wp_create_nonce('freedomtranslate_purge_single');
-                return '<form method="post" onsubmit="return confirm(\'Are you sure you want to delete the cache for this post?\');" style="margin:0;">
-                            <input type="hidden" name="freedomtranslate_nonce_single" value="' . $nonce . '">
-                            <input type="hidden" name="single_post_input" value="' . esc_attr($item['post_id']) . '">
-                            <input type="submit" name="freedomtranslate_purge_single" class="button button-small" style="color: #d63638;" value="Delete Cache">
-                        </form>';
+                $del_url = wp_nonce_url(admin_url('options-general.php?page=freedomtranslate&tab=tools&ft_action=delete_cache&post_id=' . $item['post_id']), 'ft_del_cache_' . $item['post_id']);
+                return '<a href="' . esc_url($del_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Are you sure you want to delete the cache for this post?\');">Delete Cache</a>';
             default:
                 return '';
         }
@@ -925,9 +921,10 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
             case 'lang':
                 return '<strong>' . esc_html(strtoupper($item['lang'])) . '</strong>';
             case 'scheduled':
+                if ($item['status'] === 'processing') return '<strong style="color:#27ae60;">Currently Executing ⚙️</strong>';
                 if ($item['scheduled'] === 0) return '<span style="color:#d63638; font-weight:bold;">Missing Cron</span>';
                 $time_diff = $item['scheduled'] - time();
-                if ($time_diff <= 0) return '<strong style="color:#2271b1;">Processing now / Queued</strong>';
+                if ($time_diff <= 0) return '<strong style="color:#2271b1;">Queued</strong>';
                 return 'In ' . human_time_diff(time(), $item['scheduled']);
             case 'status':
                 $bg_color = ($item['status'] === 'pending') ? '#f0b849' : (($item['status'] === 'processing') ? '#2271b1' : '#72777c');
@@ -951,20 +948,14 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
             case 'action':
                 $html = '<div style="display: flex; gap: 8px; align-items: center;">';
                 if ($item['status'] === 'pending') {
-                    $start_nonce = wp_create_nonce('freedomtranslate_start_now_job');
-                    $html .= '<form method="post" style="margin: 0;">
-                                <input type="hidden" name="freedomtranslate_nonce_start_job" value="' . $start_nonce . '">
-                                <input type="hidden" name="start_job_hash" value="' . esc_attr($item['hash_key']) . '">
-                                <input type="submit" name="freedomtranslate_start_now_job" class="button button-small button-primary" value="Start Now" title="Bypass the queue limit and start immediately">
-                              </form>';
+                    $start_url = wp_nonce_url(admin_url('options-general.php?page=freedomtranslate&tab=queue_monitor&ft_action=start_job&job_hash=' . $item['hash_key']), 'ft_start_' . $item['hash_key']);
+                    $html .= '<a href="' . esc_url($start_url) . '" class="button button-small button-primary" title="Force Start">Start Now</a>';
                 }
-                $cancel_nonce = wp_create_nonce('freedomtranslate_cancel_single_job');
-                $html .= '<form method="post" style="margin: 0;" onsubmit="return confirm(\'Are you sure you want to cancel this translation job?\');">
-                            <input type="hidden" name="freedomtranslate_nonce_cancel_job" value="' . $cancel_nonce . '">
-                            <input type="hidden" name="cancel_job_hash" value="' . esc_attr($item['hash_key']) . '">
-                            <input type="submit" name="freedomtranslate_cancel_single_job" class="button button-small" style="color: #d63638; border-color: #d63638;" value="Cancel">
-                          </form>
-                          </div>';
+
+                $cancel_url = wp_nonce_url(admin_url('options-general.php?page=freedomtranslate&tab=queue_monitor&ft_action=cancel_job&job_hash=' . $item['hash_key']), 'ft_cancel_' . $item['hash_key']);
+                $html .= '<a href="' . esc_url($cancel_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Are you sure you want to cancel this translation job?\');">Cancel</a>';
+                
+                $html .= '</div>';
                 return $html;
             default:
                 return '';
@@ -1068,20 +1059,31 @@ function freedomtranslate_settings_page() {
     $table = $wpdb->prefix . 'freedomtranslate_cache';
 
     // --- FORM HANDLERS ---
-
-    if (isset($_POST['freedomtranslate_start_now_job'])) {
-        check_admin_referer('freedomtranslate_start_now_job', 'freedomtranslate_nonce_start_job');
-        $hash_key = sanitize_text_field($_POST['start_job_hash']);
-
-        global $wpdb;
-        $table = $wpdb->prefix . 'freedomtranslate_cache';
-
-        $job = $wpdb->get_row($wpdb->prepare("SELECT post_id, target_lang FROM $table WHERE hash_key = %s", $hash_key));
-
-        if ($job) {
-            ft_update_progress($hash_key, $job->post_id, $job->target_lang, 0, 'processing');
-
-            $site_lang = substr(get_locale(), 0, 2);
+    // --- HANDLERS: START, CANCEL & DELETE ---
+    if (isset($_GET['ft_action'])) {
+        $action = sanitize_text_field($_GET['ft_action']);
+        
+        if ($action === 'start_job' && isset($_GET['job_hash'])) {
+            $hash_key = sanitize_text_field($_GET['job_hash']);
+            check_admin_referer('ft_start_' . $hash_key);
+            
+            $job = $wpdb->get_row($wpdb->prepare("SELECT post_id, target_lang FROM $table WHERE hash_key = %s", $hash_key));
+            if ($job) {
+                $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $hash_key]);
+                $site_lang = substr(get_locale(), 0, 2);
+                $args = [$hash_key, $site_lang, $job->target_lang, (int)$job->post_id, wp_rand()]; // wp_rand inganna l'anti-spam di WP
+                wp_clear_scheduled_hook('freedomtranslate_async_translate', $args);
+                wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
+                echo '<div class="notice notice-success"><p>Job forced to restart!</p></div>';
+            }
+        }
+        
+        elseif ($action === 'cancel_job' && isset($_GET['job_hash'])) {
+            $hash_key = sanitize_text_field($_GET['job_hash']);
+            check_admin_referer('ft_cancel_' . $hash_key);
+            
+            $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $hash_key . '_chunk_%'));
+            $wpdb->delete($table, ['hash_key' => $hash_key]);
 
             $crons = _get_cron_array();
             if (is_array($crons)) {
@@ -1100,43 +1102,17 @@ function freedomtranslate_settings_page() {
                 }
                 if ($changed) update_option('cron', $crons);
             }
-
-            wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $job->target_lang, $job->post_id]);
-
-            echo '<div class="notice notice-success"><p>VIP Pass activated! The translation has bypassed the queue and started immediately.</p></div>';
+            echo '<div class="notice notice-success"><p>Job killed and removed (including zombie crons).</p></div>';
         }
-    }
-
-    if (isset($_POST['freedomtranslate_cancel_single_job'])) {
-        check_admin_referer('freedomtranslate_cancel_single_job', 'freedomtranslate_nonce_cancel_job');
-        $hash_key = sanitize_text_field($_POST['cancel_job_hash']);
-
-        global $wpdb;
-        $table = $wpdb->prefix . 'freedomtranslate_cache';
-
-        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $hash_key . '_chunk_%'));
-
-        $wpdb->delete($table, ['hash_key' => $hash_key]);
-
-        $crons = _get_cron_array();
-        if (is_array($crons)) {
-            $changed = false;
-            foreach ($crons as $timestamp => $cron_hooks) {
-                if (isset($cron_hooks['freedomtranslate_async_translate'])) {
-                    foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                        if (isset($event['args'][0]) && $event['args'][0] === $hash_key) {
-                            unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
-                            if (empty($crons[$timestamp]['freedomtranslate_async_translate'])) unset($crons[$timestamp]['freedomtranslate_async_translate']);
-                            if (empty($crons[$timestamp])) unset($crons[$timestamp]);
-                            $changed = true;
-                        }
-                    }
-                }
+        
+        elseif ($action === 'delete_cache' && isset($_GET['post_id'])) {
+            $post_id = intval($_GET['post_id']);
+            check_admin_referer('ft_del_cache_' . $post_id);
+            if ($post_id > 0) {
+                $deleted = $wpdb->delete($table, ['post_id' => $post_id]);
+                if ($deleted) echo '<div class="notice notice-success"><p>Cache cleared successfully for Post ID: <strong>' . esc_html($post_id) . '</strong>.</p></div>';
             }
-            if ($changed) update_option('cron', $crons);
         }
-
-        echo '<div class="notice notice-success"><p>Translation job cancelled and completely removed from the queue.</p></div>';
     }
 
     if (isset($_POST['freedomtranslate_restore_bots'])) {
@@ -1177,7 +1153,7 @@ function freedomtranslate_settings_page() {
         $max_concurrent = max(1, min(50, absint(wp_unslash($_POST['freedomtranslate_max_concurrent_jobs']))));
         update_option(FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION, $max_concurrent);
 
-        $chunk_size = max(100, min(2000, absint(wp_unslash($_POST['freedomtranslate_chunk_size']))));
+        $chunk_size = max(100, min(3000, absint(wp_unslash($_POST['freedomtranslate_chunk_size']))));
         update_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, $chunk_size);
 
         if (isset($_POST['freedomtranslate_bot_signatures'])) {
@@ -1448,8 +1424,8 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                             <th scope="row"><label for="freedomtranslate_chunk_size">HTML Chunk Size</label></th>
                             <td>
                                 <?php $current_chunk = get_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, 500); ?>
-                                <input type="number" id="freedomtranslate_chunk_size" name="freedomtranslate_chunk_size" value="<?php echo esc_attr($current_chunk); ?>" min="100" max="2000" step="100" style="width: 80px;">
-                                <p class="description">Maximum characters per translation block. Increase this (e.g., <strong>1000-1500</strong>) for complex page builders to preserve HTML layout. Lower it (<strong>400-500</strong>) if the AI server goes into Timeout.</p>
+                                <input type="number" id="freedomtranslate_chunk_size" name="freedomtranslate_chunk_size" value="<?php echo esc_attr($current_chunk); ?>" min="100" max="3000" step="100" style="width: 80px;">
+                                <p class="description">Maximum characters per translation block. Increase this (e.g., <strong>1000-1500</strong>) for complex page builders to preserve HTML layout. Lower it (<strong>400-500</strong>) if the AI server goes into Timeout. Max: 3000</p>
                             </td>
                         </tr>
                     </table>
