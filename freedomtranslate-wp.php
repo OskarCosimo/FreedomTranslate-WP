@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.8.2
+Version: 1.8.3
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -27,6 +27,7 @@ define('FREEDOMTRANSLATE_STATIC_STRINGS_OPTION',      'freedomtranslate_static_s
 define('FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION',      'freedomtranslate_bot_signatures');
 define('FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION',      'freedomtranslate_max_concurrent_jobs');
 define('FREEDOMTRANSLATE_PREWARM_OPTION',             'freedomtranslate_prewarm_on_save');
+define('FREEDOMTRANSLATE_CHUNK_SIZE_OPTION',          'freedomtranslate_chunk_size');
 
 // ========================================================================
 // 1. DATABASE SETUP & CUSTOM CACHE ENGINE
@@ -505,8 +506,9 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         $source_text = $post->post_content;
     }
 
+    $chunk_size = (int) get_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, 500);
     list($protected_text, $sc_placeholders) = freedomtranslate_protect_shortcodes($source_text);
-    $chunks = freedomtranslate_split_html_into_chunks($protected_text, 500);
+    $chunks = freedomtranslate_split_html_into_chunks($protected_text, $chunk_size);
     $total_chunks = count($chunks);
 
     $current_status = ft_get_status_db($hash_key);
@@ -887,6 +889,178 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
     }
 }
 
+class FreedomTranslate_Queue_Table extends WP_List_Table {
+    public function __construct() {
+        parent::__construct([
+            'singular' => 'queue_job',
+            'plural'   => 'queue_jobs',
+            'ajax'     => false
+        ]);
+    }
+
+    public function get_columns() {
+        return [
+            'post_id'   => 'Target Post',
+            'lang'      => 'Language',
+            'status'    => 'Status & Progress',
+            'scheduled' => 'Scheduled Execution',
+            'action'    => 'Action'
+        ];
+    }
+
+    public function get_sortable_columns() {
+        return [
+            'post_id'   => ['post_id', false],
+            'lang'      => ['lang', false],
+            'status'    => ['status', false],
+            'scheduled' => ['scheduled', false]
+        ];
+    }
+
+    public function column_default($item, $column_name) {
+        switch ($column_name) {
+            case 'post_id':
+                if ($item['post_id'] === 'Unknown') return 'Unknown';
+                return '<strong>' . esc_html($item['post_id']) . '</strong> <a href="' . get_edit_post_link($item['post_id']) . '" target="_blank">(Edit)</a>';
+            case 'lang':
+                return '<strong>' . esc_html(strtoupper($item['lang'])) . '</strong>';
+            case 'scheduled':
+                if ($item['scheduled'] === 0) return '<span style="color:#d63638; font-weight:bold;">Missing Cron</span>';
+                $time_diff = $item['scheduled'] - time();
+                if ($time_diff <= 0) return '<strong style="color:#2271b1;">Processing now / Queued</strong>';
+                return 'In ' . human_time_diff(time(), $item['scheduled']);
+            case 'status':
+                $bg_color = ($item['status'] === 'pending') ? '#f0b849' : (($item['status'] === 'processing') ? '#2271b1' : '#72777c');
+                $status_label = strtoupper($item['status']);
+                if ($item['status'] === 'cron_only') $status_label = 'ZOMBIE CRON';
+                
+                $html = '<div style="margin-bottom: 5px;"><span style="background: ' . $bg_color . '; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">' . esc_html($status_label) . '</span></div>';
+                
+                if (in_array($item['status'], ['pending', 'processing'])) {
+                    $percent = $item['progress'];
+                    $visual_width = min(100, max(5, $percent * 5)); 
+                    $text_color = $visual_width > 50 ? '#fff' : '#000';
+                    $html .= '<div style="background: #e1e1e1; width: 100%; height: 20px; border-radius: 10px; overflow: hidden; position: relative;">
+                                <div style="background: #27ae60; width: ' . esc_attr($visual_width) . '%; height: 100%; transition: width 0.5s;"></div>
+                                <span style="position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; color: ' . $text_color . '; line-height: 20px;">
+                                    Chunk: ' . esc_html($percent) . '
+                                </span>
+                              </div>';
+                }
+                return $html;
+            case 'action':
+                $html = '<div style="display: flex; gap: 8px; align-items: center;">';
+                if ($item['status'] === 'pending') {
+                    $start_nonce = wp_create_nonce('freedomtranslate_start_now_job');
+                    $html .= '<form method="post" style="margin: 0;">
+                                <input type="hidden" name="freedomtranslate_nonce_start_job" value="' . $start_nonce . '">
+                                <input type="hidden" name="start_job_hash" value="' . esc_attr($item['hash_key']) . '">
+                                <input type="submit" name="freedomtranslate_start_now_job" class="button button-small button-primary" value="Start Now" title="Bypass the queue limit and start immediately">
+                              </form>';
+                }
+                $cancel_nonce = wp_create_nonce('freedomtranslate_cancel_single_job');
+                $html .= '<form method="post" style="margin: 0;" onsubmit="return confirm(\'Are you sure you want to cancel this translation job?\');">
+                            <input type="hidden" name="freedomtranslate_nonce_cancel_job" value="' . $cancel_nonce . '">
+                            <input type="hidden" name="cancel_job_hash" value="' . esc_attr($item['hash_key']) . '">
+                            <input type="submit" name="freedomtranslate_cancel_single_job" class="button button-small" style="color: #d63638; border-color: #d63638;" value="Cancel">
+                          </form>
+                          </div>';
+                return $html;
+            default:
+                return '';
+        }
+    }
+
+    public function prepare_items() {
+        $columns  = $this->get_columns();
+        $hidden   = [];
+        $sortable = $this->get_sortable_columns();
+        $this->_column_headers = [$columns, $hidden, $sortable];
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'freedomtranslate_cache';
+        
+        // 1. Fetch from Database
+        $db_jobs = $wpdb->get_results("SELECT * FROM $table WHERE status IN ('pending', 'processing')");
+        $unified_data = [];
+        $processed_hashes = [];
+
+        foreach ($db_jobs as $job) {
+            $unified_data[$job->hash_key] = [
+                'hash_key'  => $job->hash_key,
+                'post_id'   => $job->post_id,
+                'lang'      => $job->target_lang,
+                'status'    => $job->status,
+                'progress'  => (int)$job->progress,
+                'scheduled' => 0 // Fallback
+            ];
+            $processed_hashes[] = $job->hash_key;
+        }
+
+        // 2. Fetch from WP-Cron
+        $crons = _get_cron_array();
+        if (!empty($crons)) {
+            foreach ($crons as $timestamp => $cron_hooks) {
+                if (isset($cron_hooks['freedomtranslate_async_translate'])) {
+                    foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
+                        $hash_key = $event['args'][0];
+                        if (isset($unified_data[$hash_key])) {
+                            $unified_data[$hash_key]['scheduled'] = $timestamp;
+                        } else {
+                            // Found a cron without a DB entry (Zombie Cron)
+                            $unified_data[$hash_key] = [
+                                'hash_key'  => $hash_key,
+                                'post_id'   => isset($event['args'][3]) ? $event['args'][3] : 'Unknown',
+                                'lang'      => isset($event['args'][2]) ? $event['args'][2] : 'Unknown',
+                                'status'    => 'cron_only',
+                                'progress'  => 0,
+                                'scheduled' => $timestamp
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+
+        $data = array_values($unified_data);
+
+        // 3. Handle Search
+        $search_query = isset($_REQUEST['s']) ? sanitize_text_field(wp_unslash($_REQUEST['s'])) : '';
+        if (!empty($search_query)) {
+            $data = array_filter($data, function($item) use ($search_query) {
+                return (stripos($item['post_id'], $search_query) !== false || stripos($item['lang'], $search_query) !== false);
+            });
+        }
+
+        // 4. Handle Sorting
+        $orderby = isset($_REQUEST['orderby']) ? sanitize_text_field($_REQUEST['orderby']) : 'scheduled';
+        $order = isset($_REQUEST['order']) ? sanitize_text_field($_REQUEST['order']) : 'asc';
+        
+        usort($data, function($a, $b) use ($orderby, $order) {
+            $result = 0;
+            if ($a[$orderby] == $b[$orderby]) {
+                $result = 0;
+            } else {
+                $result = ($a[$orderby] < $b[$orderby]) ? -1 : 1;
+            }
+            return ($order === 'asc') ? $result : -$result;
+        });
+
+        // 5. Pagination
+        $per_page = 15;
+        $current_page = $this->get_pagenum();
+        $total_items = count($data);
+        
+        $this->items = array_slice($data, (($current_page - 1) * $per_page), $per_page);
+
+        $this->set_pagination_args([
+            'total_items' => $total_items,
+            'per_page'    => $per_page,
+            'total_pages' => ceil($total_items / $per_page)
+        ]);
+    }
+}
+
 function freedomtranslate_settings_page() {
     if (!current_user_can('manage_options')) wp_die(esc_html__('You do not have sufficient permissions to access this page.'));
 
@@ -1002,6 +1176,9 @@ function freedomtranslate_settings_page() {
 
         $max_concurrent = max(1, min(50, absint(wp_unslash($_POST['freedomtranslate_max_concurrent_jobs']))));
         update_option(FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION, $max_concurrent);
+
+        $chunk_size = max(100, min(2000, absint(wp_unslash($_POST['freedomtranslate_chunk_size']))));
+        update_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, $chunk_size);
 
         if (isset($_POST['freedomtranslate_bot_signatures'])) {
             $bots = array_filter(array_map('trim', preg_split('/\R/', sanitize_textarea_field(wp_unslash($_POST['freedomtranslate_bot_signatures'])))));
@@ -1267,6 +1444,14 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                                 <p class="description">Limit simultaneous background AI translation jobs. Local LLMs (like Ollama on Mac Mini) perform best with <strong>1 o 2</strong> concurrent jobs to prevent RAM exhaustion and slowdowns.</p>
                             </td>
                         </tr>
+                        <tr>
+                            <th scope="row"><label for="freedomtranslate_chunk_size">HTML Chunk Size</label></th>
+                            <td>
+                                <?php $current_chunk = get_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, 500); ?>
+                                <input type="number" id="freedomtranslate_chunk_size" name="freedomtranslate_chunk_size" value="<?php echo esc_attr($current_chunk); ?>" min="100" max="2000" step="100" style="width: 80px;">
+                                <p class="description">Maximum characters per translation block. Increase this (e.g., <strong>1000-1500</strong>) for complex page builders to preserve HTML layout. Lower it (<strong>400-500</strong>) if the AI server goes into Timeout.</p>
+                            </td>
+                        </tr>
                     </table>
                 </div>
                 
@@ -1386,189 +1571,36 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
         <?php elseif ($active_tab === 'queue_monitor'): ?>
             
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                <div style="display: flex; align-items: center; gap: 15px;">
-                    <h3 style="margin: 0;">Monitor Status</h3>
-                    <select id="ft_queue_view_selector" style="font-size: 16px; padding: 5px 10px;">
-                        <option value="view_cronjobs">WP-Cron Queue (System)</option>
-                        <option value="view_translations">Translations in Progress</option>
-                    </select>
-                </div>
-                <form method="post" onsubmit="return confirm('Are you sure you want to delete ALL pending background translations?');">
+                <h3 style="margin: 0;">Unified Translation Queue</h3>
+                <form method="post" onsubmit="return confirm('Are you sure you want to delete ALL pending background translations and cronjobs?');">
                     <?php wp_nonce_field('freedomtranslate_purge_cron', 'freedomtranslate_nonce_cron'); ?>
                     <input type="submit" name="freedomtranslate_purge_cron" class="button button-secondary" style="border-color: #d63638; color: #d63638;" value="Clear ALL Pending Jobs (Panic Button)">
                 </form>
             </div>
             
-            <p class="description">Monitor your active AI translations or inspect the underlying WP-Cron system jobs.</p>
+            <p class="description">This table merges database translation intents with scheduled WP-Cron system jobs. It gives you a complete overview of what is waiting to be translated and when the next background worker will execute.</p>
 
-            <div id="view_translations" class="ft-queue-view" style="display: none;">
-    <?php
-    global $wpdb;
-    $table = $wpdb->prefix . 'freedomtranslate_cache';
-    
-    $active_jobs = $wpdb->get_results("SELECT * FROM $table WHERE status IN ('pending', 'processing') ORDER BY post_id DESC");
-
-    $active_translations = [];
-    if (!empty($active_jobs)) {
-        foreach ($active_jobs as $job) {
-            $active_translations[] = [
-                'hash'    => $job->hash_key,
-                'post_id' => $job->post_id,
-                'lang'    => strtoupper($job->target_lang),
-                'percent' => (int) $job->progress,
-                'status'  => $job->status
-            ];
-        }
-    }
-    ?>
-
-    <?php if (empty($active_translations)): ?>
-        <div style="padding:15px; background:#e5f5fa; border-left:4px solid #00a0d2; margin-top:20px;">
-            <p style="margin:0;"><strong>No active translations at the moment.</strong></p>
-        </div>
-    <?php else: ?>
-        <table class="wp-list-table widefat fixed striped">
-            <thead>
-                <tr>
-                    <th>Target Post ID</th>
-                    <th>Target Language</th>
-                    <th>Status</th>
-                    <th>Progress</th>
-                    <th style="width: 100px;">Action</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($active_translations as $t): ?>
-                    <tr>
-                        <td>
-                            <strong><?php echo esc_html($t['post_id']); ?></strong> 
-                        </td>
-                        <td><?php echo esc_html($t['lang']); ?></td>
-                        <td>
-                            <span style="background: <?php echo $t['status'] === 'pending' ? '#f0b849' : '#2271b1'; ?>; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">
-                                <?php echo esc_html(strtoupper($t['status'])); ?>
-                            </span>
-                        </td>
-                        <td>
-                            <div style="background: #e1e1e1; width: 100%; height: 20px; border-radius: 10px; overflow: hidden; position: relative;">
-                                <?php $visual_width = min(100, max(5, $t['percent'] * 5)); ?>
-                                <div style="background: #27ae60; width: <?php echo esc_attr($visual_width); ?>%; height: 100%; transition: width 0.5s;"></div>
-                                <span style="position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; color: <?php echo $visual_width > 50 ? '#fff' : '#000'; ?>; line-height: 20px;">
-                                    Chunk: <?php echo esc_html($t['percent']); ?>
-                                </span>
-                            </div>
-                        </td>
-                        <td>
-                            <div style="display: flex; gap: 8px; align-items: center;">
-                                <?php if ($t['status'] === 'pending'): ?>
-                                    <form method="post" style="margin: 0;">
-                                        <?php wp_nonce_field('freedomtranslate_start_now_job', 'freedomtranslate_nonce_start_job'); ?>
-                                        <input type="hidden" name="start_job_hash" value="<?php echo esc_attr($t['hash']); ?>">
-                                        <input type="submit" name="freedomtranslate_start_now_job" class="button button-small button-primary" value="Start Now" title="Bypass the queue limit and start immediately">
-                                    </form>
-                                <?php endif; ?>
-
-                                <form method="post" style="margin: 0;" onsubmit="return confirm('Are you sure you want to cancel this translation?');">
-                                    <?php wp_nonce_field('freedomtranslate_cancel_single_job', 'freedomtranslate_nonce_cancel_job'); ?>
-                                    <input type="hidden" name="cancel_job_hash" value="<?php echo esc_attr($t['hash']); ?>">
-                                    <input type="submit" name="freedomtranslate_cancel_single_job" class="button button-small" style="color: #d63638; border-color: #d63638;" value="Cancel">
-                                </form>
-                            </div>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
-    <?php endif; ?>
-</div>
-
-            <div id="view_cronjobs" class="ft-queue-view">
-                <?php
-                $crons = _get_cron_array();
-                $ft_crons = [];
+            <?php
+            $queue_table = new FreedomTranslate_Queue_Table();
+            $queue_table->prepare_items();
+            
+            $is_searching = isset($_REQUEST['s']) && !empty($_REQUEST['s']);
+            
+            if (!$queue_table->has_items() && !$is_searching) {
+                echo '<div style="padding:15px; background:#e5f5fa; border-left:4px solid #00a0d2; margin-top:20px;">
+                        <p style="margin:0;"><strong>The translation queue is perfectly clear!</strong> No jobs are currently pending or processing.</p>
+                      </div>';
+            } else {
+                echo '<form method="get">';
+                echo '<input type="hidden" name="page" value="' . esc_attr($_REQUEST['page']) . '" />';
+                echo '<input type="hidden" name="tab" value="' . esc_attr($active_tab) . '" />';
                 
-                if (!empty($crons)) {
-                    foreach ($crons as $timestamp => $cron_hooks) {
-                        if (isset($cron_hooks['freedomtranslate_async_translate'])) {
-                            foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                                $ft_crons[] = [
-                                    'timestamp' => $timestamp,
-                                    'args'      => $event['args'],
-                                    'sig'       => $sig
-                                ];
-                            }
-                        }
-                    }
-                }
-                ?>
-
-                <?php if (empty($ft_crons)): ?>
-                    <div style="padding:15px; background:#e5f5fa; border-left:4px solid #00a0d2; margin-top:20px;">
-                        <p style="margin:0;"><strong>The WP-Cron queue is currently empty.</strong> No translations are waiting to be processed.</p>
-                    </div>
-                <?php else: ?>
-                    <table class="wp-list-table widefat fixed striped" style="margin-top: 15px;">
-                        <thead>
-                            <tr>
-                                <th>Scheduled Time</th>
-                                <th>Target Post ID</th>
-                                <th>Target Language</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php foreach ($ft_crons as $job): 
-                                $time_diff = $job['timestamp'] - time();
-                                $when = $time_diff > 0 ? "In " . human_time_diff(time(), $job['timestamp']) : "<strong style='color:#d63638;'>Processing now / Queued</strong>";
-                                
-                                $post_id = isset($job['args'][3]) ? $job['args'][3] : 'Unknown';
-                                $target_lang = isset($job['args'][2]) ? strtoupper($job['args'][2]) : 'Unknown';
-                                $encoded_args = base64_encode(serialize($job['args']));
-                            ?>
-                                <tr>
-                                    <td><?php echo wp_kses_post($when); ?></td>
-                                    <td><strong><?php echo esc_html($post_id); ?></strong> <a href="<?php echo get_edit_post_link($post_id); ?>" target="_blank">(Edit)</a></td>
-                                    <td><?php echo esc_html($target_lang); ?></td>
-                                    <td>
-                                        <form method="post">
-                                            <?php wp_nonce_field('freedomtranslate_delete_single_cron', 'freedomtranslate_nonce_single_cron'); ?>
-                                            <input type="hidden" name="cron_timestamp" value="<?php echo esc_attr($job['timestamp']); ?>">
-                                            <input type="hidden" name="cron_args" value="<?php echo esc_attr($encoded_args); ?>">
-                                            <input type="submit" name="freedomtranslate_delete_single_cron" class="button button-small" value="Delete">
-                                        </form>
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                <?php endif; ?>
-            </div>
-
-            <script>
-            document.addEventListener("DOMContentLoaded", function() {
-                var selector = document.getElementById('ft_queue_view_selector');
-                var views = document.querySelectorAll('.ft-queue-view');
+                $queue_table->search_box('Search by Post ID or Lang', 'search_queue');
+                $queue_table->display();
                 
-                var savedView = localStorage.getItem('ft_queue_view_preference') || 'view_cronjobs';
-                selector.value = savedView;
-                
-                for (var i = 0; i < views.length; i++) {
-                    views[i].style.display = 'none';
-                }
-                var activeView = document.getElementById(savedView);
-                if (activeView) {
-                    activeView.style.display = 'block';
-                }
-                
-                selector.addEventListener('change', function() {
-                    localStorage.setItem('ft_queue_view_preference', this.value);
-                    for (var i = 0; i < views.length; i++) {
-                        views[i].style.display = 'none';
-                    }
-                    document.getElementById(this.value).style.display = 'block';
-                });
-            });
-            </script>
+                echo '</form>';
+            }
+            ?>
 
         <?php elseif ($active_tab === 'tools'): ?>
             <h3>Database Cache Management</h3>
