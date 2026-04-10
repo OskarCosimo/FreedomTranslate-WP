@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.8.5
+Version: 1.8.6
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -457,6 +457,33 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text', $
     return $translated;
 }
 
+// ========================================================================
+// WORKER FOR STATIC STRINGS
+// ========================================================================
+add_action('freedomtranslate_async_string_translate', 'freedomtranslate_string_worker', 10, 5);
+
+function freedomtranslate_string_worker($string_id, $text, $site_lang, $target_lang, $rand = 0) {
+    if (get_transient('ft_kill_switch')) return;
+
+    $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
+
+    if ($service === 'google_official') {
+        $translated = freedomtranslate_translate_google_official($text, $site_lang, $target_lang, 'text');
+    } else {
+        $translated = freedomtranslate_translate_libre($text, $site_lang, $target_lang, 'text');
+    }
+
+    if ($translated !== $text && !empty(trim($translated))) {
+        $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
+        
+        // Ci assicuriamo che l'ID esista ancora
+        if (isset($strings[$string_id])) {
+            $strings[$string_id]['translations'][$target_lang] = $translated;
+            update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
+        }
+    }
+}
+
 function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_id) {
     if (get_transient('ft_kill_switch')) return;
 
@@ -521,7 +548,14 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     while ($done_chunks < $total_chunks) {
         if (get_transient('ft_kill_switch')) return; 
 
-        $translated_chunk = freedomtranslate_translate_libre($chunks[$done_chunks], $site_lang, $user_lang, 'html');
+        // check engine
+        $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
+        
+        if ($service === 'google_official') {
+            $translated_chunk = freedomtranslate_translate_google_official($chunks[$done_chunks], $site_lang, $user_lang, 'html');
+        } else {
+            $translated_chunk = freedomtranslate_translate_libre($chunks[$done_chunks], $site_lang, $user_lang, 'html');
+        }
         
         $chunk_hash = $hash_key . '_chunk_' . $done_chunks;
         ft_set_cache($chunk_hash, $translated_chunk, $post_id, $user_lang, HOUR_IN_SECONDS, 'chunk_temp');
@@ -1254,37 +1288,35 @@ function freedomtranslate_settings_page() {
 
     if (isset($_POST['freedomtranslate_save_static_string'])) {
         check_admin_referer('freedomtranslate_save_static_string', 'freedomtranslate_nonce_static');
+        
         $id = sanitize_key($_POST['new_string_id']);
         $text = sanitize_textarea_field($_POST['new_string_text']);
         
         if (!empty($id) && !empty($text)) {
             $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
             
-            $translations = [];
+            if (!isset($strings[$id])) {
+                $strings[$id] = ['original' => $text, 'translations' => []];
+            } else {
+                $strings[$id]['original'] = $text; // Aggiorna il testo se esiste già
+            }
+            update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
+            
             $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
             $site_lang = substr(get_locale(), 0, 2);
-            $api_url = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
-            $api_key = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
+            
+            $queued = 0;
+            $delay = 0;
 
             foreach ($enabled_langs as $lang) {
                 if ($lang === $site_lang) continue;
-                $body = ['q' => $text, 'source' => $site_lang, 'target' => $lang, 'format' => 'text'];
-                if (!empty($api_key)) $body['api_key'] = $api_key;
-                $response = wp_remote_post($api_url, ['body' => $body, 'timeout' => 30]);
-                if (!is_wp_error($response)) {
-                    $json = json_decode(wp_remote_retrieve_body($response), true);
-                    if (isset($json['translatedText'])) {
-                        $translations[$lang] = $json['translatedText'];
-                    }
-                }
+
+                wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, wp_rand()]);
+                $delay += 1;
+                $queued++;
             }
             
-            $strings[$id] = [
-                'original' => $text,
-                'translations' => $translations
-            ];
-            update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
-            echo '<div class="notice notice-success"><p>String saved and translated successfully!</p></div>';
+            echo '<div class="notice notice-success"><p>String saved instantly! <strong>' . $queued . '</strong> background translation tasks have been queued. Refresh the page in a few minutes to see them populated.</p></div>';
         }
     }
 
