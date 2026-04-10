@@ -1066,6 +1066,72 @@ function freedomtranslate_settings_page() {
     $table = $wpdb->prefix . 'freedomtranslate_cache';
 
     // --- FORM HANDLERS ---
+    // --- HANDLER: DIRECT TRANSLATE PUSH ---
+    if (isset($_POST['freedomtranslate_direct_push'])) {
+        check_admin_referer('freedomtranslate_direct_push', 'freedomtranslate_nonce_direct');
+        
+        $input = sanitize_text_field(wp_unslash($_POST['direct_post_input']));
+        
+        $post_id = 0;
+        if (is_numeric($input)) {
+            $post_id = intval($input);
+        } else {
+            $post_id = url_to_postid($input);
+            if ($post_id === 0 && function_exists('attachment_url_to_postid')) {
+                $post_id = attachment_url_to_postid($input);
+            }
+        }
+        
+        $selected_langs = isset($_POST['direct_langs']) ? array_map('sanitize_text_field', wp_unslash($_POST['direct_langs'])) : [];
+
+        if ($post_id > 0 && !empty($selected_langs)) {
+            $post = get_post($post_id);
+            if ($post) {
+                $site_lang = substr(get_locale(), 0, 2);
+                $queued_count = 0;
+                $delay = 0;
+
+                global $wpdb;
+                $table = $wpdb->prefix . 'freedomtranslate_cache';
+
+                foreach ($selected_langs as $lang) {
+                    if ($lang === $site_lang) continue;
+
+                    if (!empty($post->post_title)) {
+                        $t_hash = md5("post_{$post_id}_the_title_{$lang}") . '_the_title';
+                        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $t_hash . '_chunk_%')); 
+                        ft_update_progress($t_hash, $post_id, $lang, 0, 'pending');
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id, wp_rand()]);
+                        $delay += 2; 
+                        $queued_count++;
+                    }
+
+                    if (!empty($post->post_content)) {
+                        $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
+                        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $c_hash . '_chunk_%')); 
+                        ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, wp_rand()]);
+                        $delay += 3;
+                        $queued_count++;
+                    }
+                    
+                    if (!empty($post->post_excerpt)) {
+                        $e_hash = md5("post_{$post_id}_the_excerpt_{$lang}") . '_the_excerpt';
+                        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $e_hash . '_chunk_%'));
+                        ft_update_progress($e_hash, $post_id, $lang, 0, 'pending');
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$e_hash, $site_lang, $lang, $post_id, wp_rand()]);
+                        $delay += 2;
+                        $queued_count++;
+                    }
+                }
+                echo '<div class="notice notice-success"><p>🚀 Success! Queued <strong>' . $queued_count . '</strong> translation tasks for Post ID ' . $post_id . '. Check the Queue Monitor!</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Post not found in the database.</p></div>';
+            }
+        } else {
+            echo '<div class="notice notice-error"><p>Please enter a valid URL/ID and select at least one language.</p></div>';
+        }
+    }
     // --- HANDLERS: START, CANCEL & DELETE ---
     if (isset($_GET['ft_action'])) {
         $action = sanitize_text_field($_GET['ft_action']);
@@ -1242,53 +1308,6 @@ function freedomtranslate_settings_page() {
         if ($post_id > 0) {
             global $wpdb;
             $table = $wpdb->prefix . 'freedomtranslate_cache';
-            
-            // --- HANDLER: DIRECT TRANSLATE PUSH ---
-    if (isset($_POST['freedomtranslate_direct_push'])) {
-        check_admin_referer('freedomtranslate_direct_push', 'freedomtranslate_nonce_direct');
-        
-        $input = sanitize_text_field(wp_unslash($_POST['direct_post_input']));
-        $post_id = is_numeric($input) ? intval($input) : url_to_postid($input);
-        $selected_langs = isset($_POST['direct_langs']) ? array_map('sanitize_text_field', wp_unslash($_POST['direct_langs'])) : [];
-
-        if ($post_id > 0 && !empty($selected_langs)) {
-            $post = get_post($post_id);
-            if ($post) {
-                $site_lang = substr(get_locale(), 0, 2);
-                $queued_count = 0;
-                $delay = 0;
-
-                foreach ($selected_langs as $lang) {
-                    if ($lang === $site_lang) continue;
-
-                    if (!empty($post->post_title)) {
-                        $t_hash = md5("post_{$post_id}_the_title_{$lang}") . '_the_title';
-                        if (!ft_get_status_db($t_hash)) {
-                            ft_update_progress($t_hash, $post_id, $lang, 0, 'pending');
-                            wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id, wp_rand()]);
-                            $delay += 2; 
-                            $queued_count++;
-                        }
-                    }
-
-                    if (!empty($post->post_content)) {
-                        $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
-                        if (!ft_get_status_db($c_hash)) {
-                            ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
-                            wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, wp_rand()]);
-                            $delay += 3;
-                            $queued_count++;
-                        }
-                    }
-                }
-                echo '<div class="notice notice-success"><p>🚀 Success! Queued <strong>' . $queued_count . '</strong> translation tasks for Post ID ' . $post_id . '. Check the Queue Monitor!</p></div>';
-            } else {
-                echo '<div class="notice notice-error"><p>Post not found in the database.</p></div>';
-            }
-        } else {
-            echo '<div class="notice notice-error"><p>Please enter a valid URL/ID and select at least one language.</p></div>';
-        }
-    }
             
             $deleted = $wpdb->delete($table, ['post_id' => $post_id]);
             if ($deleted) {
