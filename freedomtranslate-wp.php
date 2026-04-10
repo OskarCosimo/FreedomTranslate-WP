@@ -1613,10 +1613,13 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
         <h2 class="nav-tab-wrapper">
             <a href="?page=freedomtranslate&tab=general" class="nav-tab <?php echo $active_tab == 'general' ? 'nav-tab-active' : ''; ?>">General & API</a>
             <a href="?page=freedomtranslate&tab=languages" class="nav-tab <?php echo $active_tab == 'languages' ? 'nav-tab-active' : ''; ?>">Languages</a>
-            <a href="?page=freedomtranslate&tab=static_strings" class="nav-tab <?php echo $active_tab == 'static_strings' ? 'nav-tab-active' : ''; ?>">Static Strings</a>
-            <a href="?page=freedomtranslate&tab=direct_translate" class="nav-tab <?php echo $active_tab == 'direct_translate' ? 'nav-tab-active' : ''; ?>">Direct Translate</a>
-            <a href="?page=freedomtranslate&tab=queue_monitor" class="nav-tab <?php echo $active_tab == 'queue_monitor' ? 'nav-tab-active' : ''; ?>">Queue Monitor</a>
-            <a href="?page=freedomtranslate&tab=tools" class="nav-tab <?php echo $active_tab == 'tools' ? 'nav-tab-active' : ''; ?>">Tools & Database</a>
+            
+            <?php if ($current_service !== 'googlehash'): // hide all if using google free ?>
+                <a href="?page=freedomtranslate&tab=static_strings" class="nav-tab <?php echo $active_tab == 'static_strings' ? 'nav-tab-active' : ''; ?>">Static Strings</a>
+                <a href="?page=freedomtranslate&tab=direct_translate" class="nav-tab <?php echo $active_tab == 'direct_translate' ? 'nav-tab-active' : ''; ?>">Direct Translate</a>
+                <a href="?page=freedomtranslate&tab=queue_monitor" class="nav-tab <?php echo $active_tab == 'queue_monitor' ? 'nav-tab-active' : ''; ?>">Queue Monitor</a>
+                <a href="?page=freedomtranslate&tab=tools" class="nav-tab <?php echo $active_tab == 'tools' ? 'nav-tab-active' : ''; ?>">Tools & Database</a>
+            <?php endif; ?>
         </h2>
 
         <div style="background:#fff; padding:20px; border:1px solid #ccd0d4; box-shadow:0 1px 1px rgba(0,0,0,.04); margin-top:15px;">
@@ -1785,6 +1788,13 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
             </script>
 
         <?php elseif ($active_tab === 'languages'): ?>
+            <div style="background:#e5f5fa; border-left:4px solid #00a0d2; padding:15px; margin-bottom:20px; max-width: 800px;">
+                <h4 style="margin-top:0; font-size: 14px;">🌐 Language Selector Shortcode</h4>
+                <p style="margin-bottom:10px;">To display the language dropdown menu anywhere on your site (like in a widget, sidebar, header, or footer), use the following shortcode:</p>
+                <p><code style="font-size: 16px; padding: 5px 10px; background: #fff; border: 1px solid #ccc;">[freedomtranslate_selector]</code></p>
+                <p class="description" style="margin-bottom:0;"><em>If you want to force the selector to translate a specific post ID regardless of the page it's placed on, you can use: <code>[freedomtranslate_selector post_id="123"]</code></em></p>
+            </div>
+            
             <form method="post">
                 <?php wp_nonce_field('freedomtranslate_save_languages', 'freedomtranslate_nonce_languages'); ?>
                 <h3>Enable Languages</h3>
