@@ -1326,8 +1326,20 @@ function freedomtranslate_settings_page() {
         }
     }
     // --- HANDLERS: START, CANCEL & DELETE ---
+    if (isset($_GET['ft_msg'])) {
+        $msg = sanitize_text_field($_GET['ft_msg']);
+        if ($msg === 'started') echo '<div class="notice notice-success is-dismissible"><p>Job forced to restart!</p></div>';
+        elseif ($msg === 'cancelled') echo '<div class="notice notice-success is-dismissible"><p>Job killed and removed.</p></div>';
+        elseif ($msg === 'deleted_cache') echo '<div class="notice notice-success is-dismissible"><p>Cache cleared successfully.</p></div>';
+        elseif ($msg === 'retranslated') echo '<div class="notice notice-success is-dismissible"><p>String queued for retranslation!</p></div>';
+        elseif ($msg === 'deleted_string') echo '<div class="notice notice-success is-dismissible"><p>String deleted.</p></div>';
+    }
+
+    // --- HANDLERS: START, CANCEL, DELETE & STRINGS (VIA GET) ---
     if (isset($_GET['ft_action'])) {
         $action = sanitize_text_field($_GET['ft_action']);
+        
+        $clean_url = remove_query_arg(['ft_action', 'job_hash', 'post_id', 'string_id', '_wpnonce']);
         
         if ($action === 'start_job' && isset($_GET['job_hash'])) {
             $hash_key = sanitize_text_field($_GET['job_hash']);
@@ -1337,11 +1349,12 @@ function freedomtranslate_settings_page() {
             if ($job) {
                 $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $hash_key]);
                 $site_lang = substr(get_locale(), 0, 2);
-                $args = [$hash_key, $site_lang, $job->target_lang, (int)$job->post_id, wp_rand()]; // wp_rand inganna l'anti-spam di WP
+                $args = [$hash_key, $site_lang, $job->target_lang, (int)$job->post_id, wp_rand()]; 
                 wp_clear_scheduled_hook('freedomtranslate_async_translate', $args);
                 wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
-                echo '<div class="notice notice-success"><p>Job forced to restart!</p></div>';
             }
+            wp_safe_redirect(add_query_arg('ft_msg', 'started', $clean_url));
+            exit;
         }
         
         elseif ($action === 'cancel_job' && isset($_GET['job_hash'])) {
@@ -1368,16 +1381,18 @@ function freedomtranslate_settings_page() {
                 }
                 if ($changed) update_option('cron', $crons);
             }
-            echo '<div class="notice notice-success"><p>Job killed and removed (including zombie crons).</p></div>';
+            wp_safe_redirect(add_query_arg('ft_msg', 'cancelled', $clean_url));
+            exit;
         }
         
         elseif ($action === 'delete_cache' && isset($_GET['post_id'])) {
             $post_id = intval($_GET['post_id']);
             check_admin_referer('ft_del_cache_' . $post_id);
             if ($post_id > 0) {
-                $deleted = $wpdb->delete($table, ['post_id' => $post_id]);
-                if ($deleted) echo '<div class="notice notice-success"><p>Cache cleared successfully for Post ID: <strong>' . esc_html($post_id) . '</strong>.</p></div>';
+                $wpdb->delete($table, ['post_id' => $post_id]);
             }
+            wp_safe_redirect(add_query_arg('ft_msg', 'deleted_cache', $clean_url));
+            exit;
         }
 
         elseif ($action === 'retranslate_string' && isset($_GET['string_id'])) {
@@ -1389,17 +1404,16 @@ function freedomtranslate_settings_page() {
                 $text = $strings[$id]['original'];
                 $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
                 $site_lang = substr(get_locale(), 0, 2);
-                $queued = 0;
                 $delay = 0;
 
                 foreach ($enabled_langs as $lang) {
                     if ($lang === $site_lang) continue;
                     wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, wp_rand()]);
                     $delay += 2; 
-                    $queued++;
                 }
-                echo '<div class="notice notice-success"><p>String "<strong>' . esc_html($id) . '</strong>" queued for retranslation! <strong>' . $queued . '</strong> tasks added to the Queue Monitor.</p></div>';
             }
+            wp_safe_redirect(add_query_arg('ft_msg', 'retranslated', $clean_url));
+            exit;
         }
         
         elseif ($action === 'delete_string' && isset($_GET['string_id'])) {
@@ -1410,8 +1424,9 @@ function freedomtranslate_settings_page() {
             if (isset($strings[$id])) {
                 unset($strings[$id]);
                 update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
-                echo '<div class="notice notice-success"><p>String "<strong>' . esc_html($id) . '</strong>" deleted.</p></div>';
             }
+            wp_safe_redirect(add_query_arg('ft_msg', 'deleted_string', $clean_url));
+            exit;
         }
     }
 
