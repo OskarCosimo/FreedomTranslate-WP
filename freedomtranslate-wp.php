@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.8.9
+Version: 1.9.0
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -328,10 +328,13 @@ function freedomtranslate_restore_shortcodes($html, $placeholders) {
 function freedomtranslate_translate_google_official($text, $source, $target, $format = 'text') {
     $api_key = get_option(FREEDOMTRANSLATE_GOOGLE_API_KEY_OPTION, '');
     if (empty($api_key)) return $text;
+    
+    $timeout = (int) get_option('freedomtranslate_api_timeout', 120);
+    
     $response = wp_remote_post('https://translation.googleapis.com/language/translate/v2', [
         'body'    => json_encode(['q'=>$text,'source'=>$source,'target'=>$target,'format'=>$format,'key'=>$api_key]),
         'headers' => ['Content-Type'=>'application/json'],
-        'timeout' => 120,
+        'timeout' => $timeout,
     ]);
     if (is_wp_error($response)) return $text;
     $json = json_decode(wp_remote_retrieve_body($response), true);
@@ -343,10 +346,12 @@ function freedomtranslate_translate_libre($text, $source, $target, $format = 'te
     $api_url   = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
     $api_key   = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
 
+    $timeout = (int) get_option('freedomtranslate_api_timeout', 120);
+
     $body = ['q'=>$text,'source'=>$source,'target'=>$target,'format'=>$format];
     if (!empty($api_key)) $body['api_key'] = $api_key;
     
-    $response = wp_remote_post($api_url, ['body'=>$body,'timeout'=>90]);
+    $response = wp_remote_post($api_url, ['body'=>$body,'timeout'=>$timeout]);
     if (is_wp_error($response)) return $text;
     
     $json = json_decode(wp_remote_retrieve_body($response), true);
@@ -547,7 +552,9 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     $done_chunks = ($current_status && $current_status->status === 'processing') ? (int) $current_status->progress : 0;
 
     $start_time = time();
-    $max_execution_time = 90;
+    // Sync the loop with the api timeout, plus 10 second of margin
+    $api_timeout = (int) get_option('freedomtranslate_api_timeout', 120);
+    $max_execution_time = $api_timeout + 10;
 
     while ($done_chunks < $total_chunks) {
         if (get_transient('ft_kill_switch')) return; 
@@ -1452,6 +1459,9 @@ function freedomtranslate_settings_page() {
         $chunk_size = max(100, min(6000, absint(wp_unslash($_POST['freedomtranslate_chunk_size']))));
         update_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, $chunk_size);
 
+        $api_timeout = max(30, min(1800, absint(wp_unslash($_POST['freedomtranslate_api_timeout']))));
+        update_option('freedomtranslate_api_timeout', $api_timeout);
+
         if (isset($_POST['freedomtranslate_bot_signatures'])) {
             $bots = array_filter(array_map('trim', preg_split('/\R/', sanitize_textarea_field(wp_unslash($_POST['freedomtranslate_bot_signatures'])))));
             update_option(FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION, $bots);
@@ -1731,6 +1741,14 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                                 <?php $current_chunk = get_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, 500); ?>
                                 <input type="number" id="freedomtranslate_chunk_size" name="freedomtranslate_chunk_size" value="<?php echo esc_attr($current_chunk); ?>" min="100" max="6000" step="100" style="width: 80px;">
                                 <p class="description">Maximum characters per translation block. Increase this (e.g., <strong>1000-1500</strong>) for complex page builders to preserve HTML layout. Lower it (<strong>400-500</strong>) if the AI server goes into Timeout. Max: 6000</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="freedomtranslate_api_timeout">AI API Timeout (Seconds)</label></th>
+                            <td>
+                                <?php $current_timeout = get_option('freedomtranslate_api_timeout', 120); ?>
+                                <input type="number" id="freedomtranslate_api_timeout" name="freedomtranslate_api_timeout" value="<?php echo esc_attr($current_timeout); ?>" min="30" max="1800" step="30" style="width: 80px;">
+                                <p class="description">Maximum time WordPress will wait for the AI to reply before giving up on a chunk. For local servers (Ollama) translating large chunks, increase this to <strong>300 (5 minutes)</strong> or even <strong>600 (10 minutes)</strong> to prevent skipped/missing translations. Max: 1800 (30 min).</p>
                             </td>
                         </tr>
                     </table>
