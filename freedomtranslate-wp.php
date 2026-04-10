@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.8.8
+Version: 1.8.9
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -988,7 +988,8 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                         $visual_width = max(5, $percent);
                         $label = 'Chunk: ' . $item['progress'] . ' / ' . $item['total_chunks'] . ' (' . $percent . '%)';
                     } else {
-                        $visual_width = min(100, max(5, $item['progress'] * 5));
+                        $visual_width = 5; // Barra al minimo
+                        $label = 'Chunk: ' . $item['progress'] . ' / ? (Waiting...)';
                     }
                     
                     $text_color = $visual_width > 50 ? '#fff' : '#000';
@@ -1042,12 +1043,13 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
 
         foreach ($db_jobs as $job) {
             $unified_data[$job->hash_key] = [
-                'hash_key'  => $job->hash_key,
-                'post_id'   => $job->post_id,
-                'lang'      => $job->target_lang,
-                'status'    => $job->status,
-                'progress'  => (int)$job->progress,
-                'scheduled' => 0 // Fallback
+                'hash_key'     => $job->hash_key,
+                'post_id'      => $job->post_id,
+                'lang'         => $job->target_lang,
+                'status'       => $job->status,
+                'progress'     => (int)$job->progress,
+                'total_chunks' => isset($job->total_chunks) ? (int)$job->total_chunks : 0,
+                'scheduled'    => 0 // Fallback
             ];
             $processed_hashes[] = $job->hash_key;
         }
@@ -1124,6 +1126,114 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
         $current_page = $this->get_pagenum();
         $total_items = count($data);
         
+        $this->items = array_slice($data, (($current_page - 1) * $per_page), $per_page);
+
+        $this->set_pagination_args([
+            'total_items' => $total_items,
+            'per_page'    => $per_page,
+            'total_pages' => ceil($total_items / $per_page)
+        ]);
+    }
+}
+
+class FreedomTranslate_Strings_Table extends WP_List_Table {
+    public function __construct() {
+        parent::__construct([
+            'singular' => 'static_string',
+            'plural'   => 'static_strings',
+            'ajax'     => false
+        ]);
+    }
+
+    public function get_columns() {
+        return [
+            'id'           => 'ID',
+            'original'     => 'Original Text',
+            'translations' => 'Translations',
+            'shortcode'    => 'Shortcode',
+            'action'       => 'Action'
+        ];
+    }
+
+    public function get_sortable_columns() {
+        return [
+            'id'       => ['id', false],
+            'original' => ['original', false]
+        ];
+    }
+
+    public function column_default($item, $column_name) {
+        switch ($column_name) {
+            case 'id':
+                return '<strong>' . esc_html($item['id']) . '</strong>';
+            case 'original':
+                return esc_html($item['original']);
+            case 'translations':
+                $color = ($item['done_count'] >= $item['expected_count']) ? '#27ae60' : '#d63638';
+                return '<strong style="color: ' . $color . ';">' . $item['done_count'] . ' / ' . $item['expected_count'] . '</strong>';
+            case 'shortcode':
+                return '<code>[ft_string id="' . esc_attr($item['id']) . '"]</code>';
+            case 'action':
+
+                $base_url = 'options-general.php?page=freedomtranslate&tab=static_strings';
+                if (!empty($_REQUEST['orderby'])) $base_url .= '&orderby=' . sanitize_text_field($_REQUEST['orderby']);
+                if (!empty($_REQUEST['order'])) $base_url .= '&order=' . sanitize_text_field($_REQUEST['order']);
+                if (!empty($_REQUEST['s'])) $base_url .= '&s=' . sanitize_text_field($_REQUEST['s']);
+
+                $ret_url = wp_nonce_url(admin_url($base_url . '&ft_action=retranslate_string&string_id=' . $item['id']), 'ft_ret_string_' . $item['id']);
+                $del_url = wp_nonce_url(admin_url($base_url . '&ft_action=delete_string&string_id=' . $item['id']), 'ft_del_string_' . $item['id']);
+
+                $html = '<div style="display: flex; gap: 8px;">';
+                $html .= '<a href="' . esc_url($ret_url) . '" class="button button-small button-primary">Retranslate</a>';
+                $html .= '<a href="' . esc_url($del_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Are you sure you want to delete this string?\');">Delete</a>';
+                $html .= '</div>';
+                return $html;
+            default:
+                return '';
+        }
+    }
+
+    public function prepare_items() {
+        $columns  = $this->get_columns();
+        $hidden   = [];
+        $sortable = $this->get_sortable_columns();
+        $this->_column_headers = [$columns, $hidden, $sortable];
+
+        $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
+        $enabled_languages = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
+        $site_lang = substr(get_locale(), 0, 2);
+        $expected_count = count($enabled_languages) - (in_array($site_lang, $enabled_languages) ? 1 : 0);
+
+        $data = [];
+        foreach ($strings as $id => $sdata) {
+            $done_count = isset($sdata['translations']) ? count($sdata['translations']) : 0;
+            $data[] = [
+                'id'             => $id,
+                'original'       => $sdata['original'],
+                'done_count'     => $done_count,
+                'expected_count' => $expected_count
+            ];
+        }
+
+        $search_query = isset($_REQUEST['s']) ? sanitize_text_field(wp_unslash($_REQUEST['s'])) : '';
+        if (!empty($search_query)) {
+            $data = array_filter($data, function($item) use ($search_query) {
+                return (stripos($item['id'], $search_query) !== false || stripos($item['original'], $search_query) !== false);
+            });
+        }
+
+        $orderby = isset($_REQUEST['orderby']) ? sanitize_text_field($_REQUEST['orderby']) : 'id';
+        $order = isset($_REQUEST['order']) ? sanitize_text_field($_REQUEST['order']) : 'asc';
+
+        usort($data, function($a, $b) use ($orderby, $order) {
+            $result = strcasecmp($a[$orderby], $b[$orderby]);
+            return ($order === 'asc') ? $result : -$result;
+        });
+
+        $per_page = 15;
+        $current_page = $this->get_pagenum();
+        $total_items = count($data);
+
         $this->items = array_slice($data, (($current_page - 1) * $per_page), $per_page);
 
         $this->set_pagination_args([
@@ -1262,6 +1372,40 @@ function freedomtranslate_settings_page() {
                 if ($deleted) echo '<div class="notice notice-success"><p>Cache cleared successfully for Post ID: <strong>' . esc_html($post_id) . '</strong>.</p></div>';
             }
         }
+
+        elseif ($action === 'retranslate_string' && isset($_GET['string_id'])) {
+            $id = sanitize_key($_GET['string_id']);
+            check_admin_referer('ft_ret_string_' . $id);
+            
+            $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
+            if (isset($strings[$id])) {
+                $text = $strings[$id]['original'];
+                $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
+                $site_lang = substr(get_locale(), 0, 2);
+                $queued = 0;
+                $delay = 0;
+
+                foreach ($enabled_langs as $lang) {
+                    if ($lang === $site_lang) continue;
+                    wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, wp_rand()]);
+                    $delay += 2; 
+                    $queued++;
+                }
+                echo '<div class="notice notice-success"><p>String "<strong>' . esc_html($id) . '</strong>" queued for retranslation! <strong>' . $queued . '</strong> tasks added to the Queue Monitor.</p></div>';
+            }
+        }
+        
+        elseif ($action === 'delete_string' && isset($_GET['string_id'])) {
+            $id = sanitize_key($_GET['string_id']);
+            check_admin_referer('ft_del_string_' . $id);
+            
+            $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
+            if (isset($strings[$id])) {
+                unset($strings[$id]);
+                update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
+                echo '<div class="notice notice-success"><p>String "<strong>' . esc_html($id) . '</strong>" deleted.</p></div>';
+            }
+        }
     }
 
     if (isset($_POST['freedomtranslate_restore_bots'])) {
@@ -1359,17 +1503,6 @@ function freedomtranslate_settings_page() {
             }
             
             echo '<div class="notice notice-success"><p>String saved instantly! <strong>' . $queued . '</strong> background translation tasks have been queued. Refresh the page in a few minutes to see them populated.</p></div>';
-        }
-    }
-
-    if (isset($_POST['freedomtranslate_delete_string'])) {
-        check_admin_referer('freedomtranslate_delete_string', 'freedomtranslate_nonce_del_string');
-        $id = sanitize_key($_POST['delete_string_id']);
-        $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
-        if (isset($strings[$id])) {
-            unset($strings[$id]);
-            update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
-            echo '<div class="notice notice-success"><p>String deleted.</p></div>';
         }
     }
 
@@ -1689,29 +1822,27 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
             </div>
 
             <h4>Saved Strings</h4>
-            <?php if (empty($static_strings)): ?>
-                <p>No static strings added yet.</p>
-            <?php else: ?>
-                <table class="wp-list-table widefat fixed striped">
-                    <thead><tr><th>ID</th><th>Original Text</th><th>Shortcode</th><th>Action</th></tr></thead>
-                    <tbody>
-                        <?php foreach ($static_strings as $id => $data): ?>
-                            <tr>
-                                <td><strong><?php echo esc_html($id); ?></strong></td>
-                                <td><?php echo esc_html($data['original']); ?></td>
-                                <td><code>[ft_string id="<?php echo esc_attr($id); ?>"]</code></td>
-                                <td>
-                                    <form method="post" onsubmit="return confirm('Delete this string?');">
-                                        <?php wp_nonce_field('freedomtranslate_delete_string', 'freedomtranslate_nonce_del_string'); ?>
-                                        <input type="hidden" name="delete_string_id" value="<?php echo esc_attr($id); ?>">
-                                        <input type="submit" name="freedomtranslate_delete_string" class="button button-small" value="Delete">
-                                    </form>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            <?php endif; ?>
+            <?php
+            $strings_table = new FreedomTranslate_Strings_Table();
+            $strings_table->prepare_items();
+            
+            $is_searching = isset($_REQUEST['s']) && !empty($_REQUEST['s']);
+            
+            if (!$strings_table->has_items() && !$is_searching) {
+                echo '<div style="padding:15px; background:#e5f5fa; border-left:4px solid #00a0d2; margin-top:20px;">
+                        <p style="margin:0;">No static strings added yet.</p>
+                      </div>';
+            } else {
+                echo '<form method="get">';
+                echo '<input type="hidden" name="page" value="' . esc_attr($_REQUEST['page']) . '" />';
+                echo '<input type="hidden" name="tab" value="' . esc_attr($active_tab) . '" />';
+                
+                $strings_table->search_box('Search Strings', 'search_strings');
+                $strings_table->display();
+                
+                echo '</form>';
+            }
+            ?>
 
             <?php elseif ($active_tab === 'direct_translate'): ?>
             <h3>Manual Direct Translation</h3>
