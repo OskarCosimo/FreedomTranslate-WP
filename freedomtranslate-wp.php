@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.9.1
+Version: 1.9.2
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -1037,9 +1037,13 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
     }
 
     public function column_default($item, $column_name) {
+        $group_key = isset($item['group_key']) ? $item['group_key'] : 'group_' . $item['post_id'] . '_' . $item['lang'];
+        $safe_id = md5($group_key);
+        $is_string = strpos($group_key, 'string_job_') === 0;
+
         switch ($column_name) {
             case 'post_id':
-                if ($item['post_id'] === 'Unknown') return 'Unknown';
+                if ($item['post_id'] === 'Unknown' || $is_string) return '<strong>' . esc_html($item['post_id']) . '</strong>';
                 return '<strong>' . esc_html($item['post_id']) . '</strong> <a href="' . get_edit_post_link($item['post_id']) . '" target="_blank">(Edit)</a>';
             case 'lang':
                 return '<strong>' . esc_html(strtoupper($item['lang'])) . '</strong>';
@@ -1054,49 +1058,48 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                 $status_label = strtoupper($item['status']);
                 if ($item['status'] === 'cron_only') $status_label = 'ZOMBIE CRON';
                 
-                $html = '<div style="margin-bottom: 5px;"><span style="background: ' . $bg_color . '; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">' . esc_html($status_label) . '</span></div>';
+                // QUI CI SONO GLI ID MANGIATI DAL JAVASCRIPT!
+                $html = '<div style="margin-bottom: 5px;" id="ft_status_wrap_' . $safe_id . '"><span id="ft_status_badge_' . $safe_id . '" style="background: ' . $bg_color . '; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">' . esc_html($status_label) . '</span></div>';
                 
                 if (in_array($item['status'], ['pending', 'processing'])) {
                     $percent = 0;
                     $visual_width = 5;
-                    $label = 'Chunk: ' . $item['progress'];
+                    $label = 'Chunk: ' . $item['progress'] . ' / ? (Waiting...)';
                     
                     if (isset($item['total_chunks']) && $item['total_chunks'] > 0) {
                         $percent = round(($item['progress'] / $item['total_chunks']) * 100);
                         $visual_width = max(5, $percent);
                         $label = 'Chunk: ' . $item['progress'] . ' / ' . $item['total_chunks'] . ' (' . $percent . '%)';
-                    } else {
-                        $visual_width = 5; // Barra al minimo
-                        $label = 'Chunk: ' . $item['progress'] . ' / ? (Waiting...)';
                     }
                     
                     $text_color = $visual_width > 50 ? '#fff' : '#000';
                     $html .= '<div style="background: #e1e1e1; width: 100%; height: 20px; border-radius: 10px; overflow: hidden; position: relative;">
-                                <div style="background: #27ae60; width: ' . esc_attr($visual_width) . '%; height: 100%; transition: width 0.5s;"></div>
-                                <span style="position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; color: ' . $text_color . '; line-height: 20px; white-space: nowrap;">
+                                <div id="ft_bar_fill_' . $safe_id . '" style="background: #27ae60; width: ' . esc_attr($visual_width) . '%; height: 100%; transition: width 0.5s;"></div>
+                                <span id="ft_bar_text_' . $safe_id . '" style="position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; color: ' . $text_color . '; line-height: 20px; white-space: nowrap;">
                                     ' . esc_html($label) . '
                                 </span>
                               </div>';
                 }
                 return $html;
             case 'action':
-                if (strpos($item['hash_key'], 'string_job_') === 0) {
-                    return '<span style="color:#888;">(Fast String Job)</span>';
-                }
+                if ($is_string) return '<span style="color:#888;">(Fast String Job)</span>';
                 
                 $base_url = 'options-general.php?page=freedomtranslate&tab=queue_monitor';
                 if (!empty($_REQUEST['orderby'])) $base_url .= '&orderby=' . sanitize_text_field($_REQUEST['orderby']);
                 if (!empty($_REQUEST['order'])) $base_url .= '&order=' . sanitize_text_field($_REQUEST['order']);
                 if (!empty($_REQUEST['s'])) $base_url .= '&s=' . sanitize_text_field($_REQUEST['s']);
                 
+                $action_suffix = '&post_id=' . $item['post_id'] . '&lang=' . $item['lang'];
+                $nonce_key = 'ft_group_' . $item['post_id'] . '_' . $item['lang'];
+                
                 $html = '<div style="display: flex; gap: 8px; align-items: center;">';
                 if ($item['status'] === 'pending') {
-                    $start_url = wp_nonce_url(admin_url($base_url . '&ft_action=start_job&job_hash=' . $item['hash_key']), 'ft_start_' . $item['hash_key']);
+                    $start_url = wp_nonce_url(admin_url($base_url . '&ft_action=start_group' . $action_suffix), $nonce_key);
                     $html .= '<a href="' . esc_url($start_url) . '" class="button button-small button-primary" title="Force Start">Start Now</a>';
                 }
 
-                $cancel_url = wp_nonce_url(admin_url($base_url . '&ft_action=cancel_job&job_hash=' . $item['hash_key']), 'ft_cancel_' . $item['hash_key']);
-                $html .= '<a href="' . esc_url($cancel_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Are you sure you want to cancel this translation job?\');">Cancel</a>';
+                $cancel_url = wp_nonce_url(admin_url($base_url . '&ft_action=cancel_group' . $action_suffix), $nonce_key);
+                $html .= '<a href="' . esc_url($cancel_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Are you sure you want to cancel ALL translation parts for this post?\');">Cancel</a>';
                 
                 $html .= '</div>';
                 return $html;
@@ -1114,47 +1117,55 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
         global $wpdb;
         $table = $wpdb->prefix . 'freedomtranslate_cache';
         
-        // 1. Fetch from Database
         $db_jobs = $wpdb->get_results("SELECT * FROM $table WHERE status IN ('pending', 'processing')");
         $unified_data = [];
-        $processed_hashes = [];
 
         foreach ($db_jobs as $job) {
-            $unified_data[$job->hash_key] = [
-                'hash_key'     => $job->hash_key,
-                'post_id'      => $job->post_id,
-                'lang'         => $job->target_lang,
-                'status'       => $job->status,
-                'progress'     => (int)$job->progress,
-                'total_chunks' => isset($job->total_chunks) ? (int)$job->total_chunks : 0,
-                'scheduled'    => 0 // Fallback
-            ];
-            $processed_hashes[] = $job->hash_key;
+            $is_string = (strpos($job->hash_key, 'string_job_') === 0);
+            $group_key = $is_string ? $job->hash_key : 'group_' . $job->post_id . '_' . $job->target_lang;
+
+            if (!isset($unified_data[$group_key])) {
+                $unified_data[$group_key] = [
+                    'group_key'    => $group_key,
+                    'hash_key'     => $job->hash_key,
+                    'post_id'      => $job->post_id,
+                    'lang'         => $job->target_lang,
+                    'status'       => $job->status,
+                    'progress'     => (int)$job->progress,
+                    'total_chunks' => (int)$job->total_chunks,
+                    'scheduled'    => 0
+                ];
+            } else {
+                $unified_data[$group_key]['progress'] += (int)$job->progress;
+                $unified_data[$group_key]['total_chunks'] += (int)$job->total_chunks;
+                if ($job->status === 'processing') {
+                    $unified_data[$group_key]['status'] = 'processing';
+                }
+            }
         }
 
-        // 2. Fetch from WP-Cron
         $crons = _get_cron_array();
         if (!empty($crons)) {
             foreach ($crons as $timestamp => $cron_hooks) {
-                
                 if (isset($cron_hooks['freedomtranslate_async_translate'])) {
                     foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
                         $hash_key = $event['args'][0];
-                        if (isset($unified_data[$hash_key])) {
-                            $unified_data[$hash_key]['scheduled'] = $timestamp;
+                        $post_id = isset($event['args'][3]) ? $event['args'][3] : 'Unknown';
+                        $lang = isset($event['args'][2]) ? $event['args'][2] : 'Unknown';
+                        $group_key = 'group_' . $post_id . '_' . $lang;
+
+                        if (isset($unified_data[$group_key])) {
+                            if ($unified_data[$group_key]['scheduled'] === 0 || $timestamp < $unified_data[$group_key]['scheduled']) {
+                                $unified_data[$group_key]['scheduled'] = $timestamp;
+                            }
                         } else {
-                            $unified_data[$hash_key] = [
-                                'hash_key'  => $hash_key,
-                                'post_id'   => isset($event['args'][3]) ? $event['args'][3] : 'Unknown',
-                                'lang'      => isset($event['args'][2]) ? $event['args'][2] : 'Unknown',
-                                'status'    => 'cron_only',
-                                'progress'  => 0,
-                                'scheduled' => $timestamp
+                            $unified_data[$group_key] = [
+                                'group_key' => $group_key, 'hash_key' => $hash_key, 'post_id' => $post_id,
+                                'lang' => $lang, 'status' => 'cron_only', 'progress' => 0, 'total_chunks' => 0, 'scheduled' => $timestamp
                             ];
                         }
                     }
                 }
-
                 if (isset($cron_hooks['freedomtranslate_async_string_translate'])) {
                     foreach ($cron_hooks['freedomtranslate_async_string_translate'] as $sig => $event) {
                         $string_id = isset($event['args'][0]) ? $event['args'][0] : 'Unknown';
@@ -1162,22 +1173,16 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                         $hash_key = 'string_job_' . $string_id . '_' . $target_lang . '_' . $sig; 
                         
                         $unified_data[$hash_key] = [
-                            'hash_key'  => $hash_key,
-                            'post_id'   => 'String: ' . $string_id, // Etichetta speciale per distinguerli
-                            'lang'      => $target_lang,
-                            'status'    => 'pending',
-                            'progress'  => 0,
-                            'scheduled' => $timestamp
+                            'group_key' => $hash_key, 'hash_key' => $hash_key, 'post_id' => 'String: ' . $string_id,
+                            'lang' => $target_lang, 'status' => 'pending', 'progress' => 0, 'total_chunks' => 0, 'scheduled' => $timestamp
                         ];
                     }
                 }
-                
             }
         }
 
         $data = array_values($unified_data);
 
-        // 3. Handle Search
         $search_query = isset($_REQUEST['s']) ? sanitize_text_field(wp_unslash($_REQUEST['s'])) : '';
         if (!empty($search_query)) {
             $data = array_filter($data, function($item) use ($search_query) {
@@ -1185,32 +1190,17 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
             });
         }
 
-        // 4. Handle Sorting
         $orderby = isset($_REQUEST['orderby']) ? sanitize_text_field($_REQUEST['orderby']) : 'scheduled';
         $order = isset($_REQUEST['order']) ? sanitize_text_field($_REQUEST['order']) : 'asc';
-        
         usort($data, function($a, $b) use ($orderby, $order) {
-            $result = 0;
-            if ($a[$orderby] == $b[$orderby]) {
-                $result = 0;
-            } else {
-                $result = ($a[$orderby] < $b[$orderby]) ? -1 : 1;
-            }
+            $result = ($a[$orderby] == $b[$orderby]) ? 0 : (($a[$orderby] < $b[$orderby]) ? -1 : 1);
             return ($order === 'asc') ? $result : -$result;
         });
 
-        // 5. Pagination
         $per_page = 15;
         $current_page = $this->get_pagenum();
-        $total_items = count($data);
-        
         $this->items = array_slice($data, (($current_page - 1) * $per_page), $per_page);
-
-        $this->set_pagination_args([
-            'total_items' => $total_items,
-            'per_page'    => $per_page,
-            'total_pages' => ceil($total_items / $per_page)
-        ]);
+        $this->set_pagination_args(['total_items' => count($data), 'per_page' => $per_page, 'total_pages' => ceil(count($data) / $per_page)]);
     }
 }
 
