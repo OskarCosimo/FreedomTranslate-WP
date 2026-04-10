@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.8.4
+Version: 1.8.5
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -28,6 +28,7 @@ define('FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION',      'freedomtranslate_bot_sign
 define('FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION',      'freedomtranslate_max_concurrent_jobs');
 define('FREEDOMTRANSLATE_PREWARM_OPTION',             'freedomtranslate_prewarm_on_save');
 define('FREEDOMTRANSLATE_CHUNK_SIZE_OPTION',          'freedomtranslate_chunk_size');
+define('FREEDOMTRANSLATE_STRICT_MANUAL_OPTION',       'freedomtranslate_strict_manual');
 
 // ========================================================================
 // 1. DATABASE SETUP & CUSTOM CACHE ENGINE
@@ -630,9 +631,15 @@ function freedomtranslate_filter_post_content($content, $id = null) {
         if (freedomtranslate_is_bot()) return $content;
 
         if (!$status_data) {
+            // --- STRICT MANUAL MODE CHECK ---
+            if (get_option(FREEDOMTRANSLATE_STRICT_MANUAL_OPTION, '0') === '1') {
+                return $content; 
+            }
+            // --------------------------------
+
             ft_update_progress($active_hash, $current_obj_id, $user_lang, 0, 'pending');
             wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [
-                $active_hash, $site_lang, $user_lang, $current_obj_id
+                $active_hash, $site_lang, $user_lang, $current_obj_id, wp_rand()
             ]);
         }
 
@@ -1147,13 +1154,16 @@ function freedomtranslate_settings_page() {
         $prewarm = isset($_POST['freedomtranslate_prewarm_on_save']) ? '1' : '0';
         update_option('freedomtranslate_prewarm_on_save', $prewarm);
 
+        $strict_manual = isset($_POST['freedomtranslate_strict_manual']) ? '1' : '0';
+        update_option(FREEDOMTRANSLATE_STRICT_MANUAL_OPTION, $strict_manual);
+
         $ttl = max(0, min(365, absint(wp_unslash($_POST['freedomtranslate_cache_ttl_global']))));
         update_option(FREEDOMTRANSLATE_CACHE_TTL_OPTION, $ttl);
 
         $max_concurrent = max(1, min(50, absint(wp_unslash($_POST['freedomtranslate_max_concurrent_jobs']))));
         update_option(FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION, $max_concurrent);
 
-        $chunk_size = max(100, min(3000, absint(wp_unslash($_POST['freedomtranslate_chunk_size']))));
+        $chunk_size = max(100, min(6000, absint(wp_unslash($_POST['freedomtranslate_chunk_size']))));
         update_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, $chunk_size);
 
         if (isset($_POST['freedomtranslate_bot_signatures'])) {
@@ -1232,6 +1242,53 @@ function freedomtranslate_settings_page() {
         if ($post_id > 0) {
             global $wpdb;
             $table = $wpdb->prefix . 'freedomtranslate_cache';
+            
+            // --- HANDLER: DIRECT TRANSLATE PUSH ---
+    if (isset($_POST['freedomtranslate_direct_push'])) {
+        check_admin_referer('freedomtranslate_direct_push', 'freedomtranslate_nonce_direct');
+        
+        $input = sanitize_text_field(wp_unslash($_POST['direct_post_input']));
+        $post_id = is_numeric($input) ? intval($input) : url_to_postid($input);
+        $selected_langs = isset($_POST['direct_langs']) ? array_map('sanitize_text_field', wp_unslash($_POST['direct_langs'])) : [];
+
+        if ($post_id > 0 && !empty($selected_langs)) {
+            $post = get_post($post_id);
+            if ($post) {
+                $site_lang = substr(get_locale(), 0, 2);
+                $queued_count = 0;
+                $delay = 0;
+
+                foreach ($selected_langs as $lang) {
+                    if ($lang === $site_lang) continue;
+
+                    if (!empty($post->post_title)) {
+                        $t_hash = md5("post_{$post_id}_the_title_{$lang}") . '_the_title';
+                        if (!ft_get_status_db($t_hash)) {
+                            ft_update_progress($t_hash, $post_id, $lang, 0, 'pending');
+                            wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id, wp_rand()]);
+                            $delay += 2; 
+                            $queued_count++;
+                        }
+                    }
+
+                    if (!empty($post->post_content)) {
+                        $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
+                        if (!ft_get_status_db($c_hash)) {
+                            ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
+                            wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, wp_rand()]);
+                            $delay += 3;
+                            $queued_count++;
+                        }
+                    }
+                }
+                echo '<div class="notice notice-success"><p>🚀 Success! Queued <strong>' . $queued_count . '</strong> translation tasks for Post ID ' . $post_id . '. Check the Queue Monitor!</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Post not found in the database.</p></div>';
+            }
+        } else {
+            echo '<div class="notice notice-error"><p>Please enter a valid URL/ID and select at least one language.</p></div>';
+        }
+    }
             
             $deleted = $wpdb->delete($table, ['post_id' => $post_id]);
             if ($deleted) {
@@ -1329,6 +1386,7 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
             <a href="?page=freedomtranslate&tab=general" class="nav-tab <?php echo $active_tab == 'general' ? 'nav-tab-active' : ''; ?>">General & API</a>
             <a href="?page=freedomtranslate&tab=languages" class="nav-tab <?php echo $active_tab == 'languages' ? 'nav-tab-active' : ''; ?>">Languages</a>
             <a href="?page=freedomtranslate&tab=static_strings" class="nav-tab <?php echo $active_tab == 'static_strings' ? 'nav-tab-active' : ''; ?>">Static Strings</a>
+            <a href="?page=freedomtranslate&tab=direct_translate" class="nav-tab <?php echo $active_tab == 'direct_translate' ? 'nav-tab-active' : ''; ?>">Direct Translate</a>
             <a href="?page=freedomtranslate&tab=queue_monitor" class="nav-tab <?php echo $active_tab == 'queue_monitor' ? 'nav-tab-active' : ''; ?>">Queue Monitor</a>
             <a href="?page=freedomtranslate&tab=tools" class="nav-tab <?php echo $active_tab == 'tools' ? 'nav-tab-active' : ''; ?>">Tools & Database</a>
         </h2>
@@ -1407,6 +1465,17 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                             </td>
                         </tr>
                         <tr>
+                            <th scope="row">Strict Manual Mode</th>
+                            <td>
+                                <label>
+                                    <?php $strict_val = get_option(FREEDOMTRANSLATE_STRICT_MANUAL_OPTION, '0'); ?>
+                                    <input type="checkbox" name="freedomtranslate_strict_manual" value="1" <?php checked($strict_val, '1'); ?>>
+                                    <strong style="color: #d63638;">Disable automatic background translations on page visit</strong>
+                                </label>
+                                <p class="description">If checked, translations will ONLY start if you manually push them via the <strong>Direct Translate</strong> tab. Visiting an untranslated page will simply show the original text without waking up the AI server.</p>
+                            </td>
+                        </tr>
+                        <tr>
                             <th scope="row"><label for="freedomtranslate_cache_ttl_global">Cache TTL (Days)</label></th>
                             <td>
                                 <input type="number" id="freedomtranslate_cache_ttl_global" name="freedomtranslate_cache_ttl_global" value="<?php echo esc_attr($global_ttl); ?>" min="0" max="365" style="width: 80px;">
@@ -1424,8 +1493,8 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                             <th scope="row"><label for="freedomtranslate_chunk_size">HTML Chunk Size</label></th>
                             <td>
                                 <?php $current_chunk = get_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, 500); ?>
-                                <input type="number" id="freedomtranslate_chunk_size" name="freedomtranslate_chunk_size" value="<?php echo esc_attr($current_chunk); ?>" min="100" max="3000" step="100" style="width: 80px;">
-                                <p class="description">Maximum characters per translation block. Increase this (e.g., <strong>1000-1500</strong>) for complex page builders to preserve HTML layout. Lower it (<strong>400-500</strong>) if the AI server goes into Timeout. Max: 3000</p>
+                                <input type="number" id="freedomtranslate_chunk_size" name="freedomtranslate_chunk_size" value="<?php echo esc_attr($current_chunk); ?>" min="100" max="6000" step="100" style="width: 80px;">
+                                <p class="description">Maximum characters per translation block. Increase this (e.g., <strong>1000-1500</strong>) for complex page builders to preserve HTML layout. Lower it (<strong>400-500</strong>) if the AI server goes into Timeout. Max: 6000</p>
                             </td>
                         </tr>
                     </table>
@@ -1543,6 +1612,51 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                     </tbody>
                 </table>
             <?php endif; ?>
+
+            <?php elseif ($active_tab === 'direct_translate'): ?>
+            <h3>Manual Direct Translation</h3>
+            <p class="description">Save your local AI server resources! Instead of waiting for users to visit pages, paste a post URL here and push it to the background translation queue manually.</p>
+            
+            <div style="background:#f9f9f9; padding:20px; border:1px solid #ccc; margin-top: 15px; border-radius: 5px;">
+                <form method="post">
+                    <?php wp_nonce_field('freedomtranslate_direct_push', 'freedomtranslate_nonce_direct'); ?>
+                    
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row"><label>Target Post/Page</label></th>
+                            <td>
+                                <input type="text" name="direct_post_input" placeholder="e.g., https://yoursite.com/my-post/  OR  Post ID (123)" class="large-text" required style="max-width: 600px;">
+                                <p class="description">Paste the full URL of the post or its ID.</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label>Translate Into...</label></th>
+                            <td>
+                                <div style="column-count: 3; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 4px; max-width: 600px;">
+                                    <?php 
+                                    $site_lang = substr(get_locale(), 0, 2);
+                                    foreach ($enabled_languages as $code): 
+                                        if ($code === $site_lang) continue;
+                                    ?>
+                                        <label style="display:block;margin-bottom:5px;">
+                                            <input type="checkbox" name="direct_langs[]" value="<?php echo esc_attr($code); ?>" checked>
+                                            <strong><?php echo esc_html(strtoupper($code)); ?></strong> - <?php echo esc_html($all_languages[$code]); ?>
+                                        </label>
+                                    <?php endforeach; ?>
+                                </div>
+                                <p class="description" style="margin-top: 10px;">
+                                    <a href="#" onclick="jQuery('input[name=\'direct_langs[]\']').prop('checked', true); return false;">Select All</a> | 
+                                    <a href="#" onclick="jQuery('input[name=\'direct_langs[]\']').prop('checked', false); return false;">Deselect All</a>
+                                </p>
+                            </td>
+                        </tr>
+                    </table>
+
+                    <p class="submit">
+                        <input type="submit" name="freedomtranslate_direct_push" class="button button-primary button-large" value="Push to Translation Queue 🚀">
+                    </p>
+                </form>
+            </div>
 
         <?php elseif ($active_tab === 'queue_monitor'): ?>
             
