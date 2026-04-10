@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.8.6
+Version: 1.8.8
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -45,7 +45,8 @@ function freedomtranslate_install_db() {
     target_lang varchar(10) NOT NULL,
     translation longtext NOT NULL,
     status varchar(20) NOT NULL DEFAULT 'completed', 
-    progress tinyint(3) NOT NULL DEFAULT 0,
+    progress int(11) NOT NULL DEFAULT 0,
+    total_chunks int(11) NOT NULL DEFAULT 0,
     expires_at datetime DEFAULT NULL,
     PRIMARY KEY  (hash_key),
     KEY post_id (post_id)
@@ -53,16 +54,16 @@ function freedomtranslate_install_db() {
 
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
     dbDelta($sql);
-    update_option('freedomtranslate_db_version', '1.2');
+    update_option('freedomtranslate_db_version', '1.3'); // Aggiornato a 1.3 per forzare la modifica
 }
 register_activation_hook(__FILE__, 'freedomtranslate_install_db');
 add_action('admin_init', function() {
-    if (get_option('freedomtranslate_db_version') !== '1.2') {
+    if (get_option('freedomtranslate_db_version') !== '1.3') {
         freedomtranslate_install_db();
     }
 });
 
-function ft_update_progress($hash_key, $post_id, $lang, $progress, $status = 'processing') {
+function ft_update_progress($hash_key, $post_id, $lang, $progress, $status = 'processing', $total_chunks = 0) {
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
     $wpdb->replace($table, [
@@ -72,14 +73,15 @@ function ft_update_progress($hash_key, $post_id, $lang, $progress, $status = 'pr
         'translation' => '',
         'status'      => $status,
         'progress'    => $progress,
+        'total_chunks'=> $total_chunks,
         'expires_at'  => null
-    ], ['%s', '%d', '%s', '%s', '%s', '%d', '%s']);
+    ], ['%s', '%d', '%s', '%s', '%s', '%d', '%d', '%s']);
 }
 
 function ft_get_status_db($hash_key) {
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
-    return $wpdb->get_row($wpdb->prepare("SELECT status, progress FROM $table WHERE hash_key = %s", $hash_key));
+    return $wpdb->get_row($wpdb->prepare("SELECT status, progress, total_chunks FROM $table WHERE hash_key = %s", $hash_key));
 }
 
 function ft_get_cache($hash_key) {
@@ -110,8 +112,10 @@ function ft_set_cache($hash_key, $translation, $post_id, $target_lang, $ttl_seco
         'target_lang' => $target_lang,
         'translation' => $translation,
         'status'      => $status,
+        'progress'    => 100,
+        'total_chunks'=> 0,
         'expires_at'  => $expires
-    ], ['%s', '%d', '%s', '%s', '%s']);
+    ], ['%s', '%d', '%s', '%s', '%s', '%d', '%d', '%s']);
 }
 
 function freedomtranslate_get_default_bots_string() {
@@ -508,7 +512,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
             return;
         }
 
-        ft_update_progress($hash_key, $post_id, $user_lang, 0, 'processing');
+        ft_update_progress($hash_key, $post_id, $user_lang, 0, 'processing', $total_chunks);
     }
 
     if ($post->post_type === 'nav_menu_item') {
@@ -561,7 +565,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         ft_set_cache($chunk_hash, $translated_chunk, $post_id, $user_lang, HOUR_IN_SECONDS, 'chunk_temp');
 
         $done_chunks++;
-        ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'processing');
+        ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'processing', $total_chunks);
 
         if ($done_chunks < $total_chunks && (time() - $start_time) >= $max_execution_time) {
             wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, wp_rand()]);
@@ -666,7 +670,7 @@ function freedomtranslate_filter_post_content($content, $id = null) {
 
         if (!$status_data) {
             // --- STRICT MANUAL MODE CHECK ---
-            if (get_option(FREEDOMTRANSLATE_STRICT_MANUAL_OPTION, '0') === '1') {
+            if (get_option(FREEDOMTRANSLATE_STRICT_MANUAL_OPTION, '1') === '1') {
                 return $content; 
             }
             // --------------------------------
@@ -975,13 +979,23 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                 $html = '<div style="margin-bottom: 5px;"><span style="background: ' . $bg_color . '; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">' . esc_html($status_label) . '</span></div>';
                 
                 if (in_array($item['status'], ['pending', 'processing'])) {
-                    $percent = $item['progress'];
-                    $visual_width = min(100, max(5, $percent * 5)); 
+                    $percent = 0;
+                    $visual_width = 5;
+                    $label = 'Chunk: ' . $item['progress'];
+                    
+                    if (isset($item['total_chunks']) && $item['total_chunks'] > 0) {
+                        $percent = round(($item['progress'] / $item['total_chunks']) * 100);
+                        $visual_width = max(5, $percent);
+                        $label = 'Chunk: ' . $item['progress'] . ' / ' . $item['total_chunks'] . ' (' . $percent . '%)';
+                    } else {
+                        $visual_width = min(100, max(5, $item['progress'] * 5));
+                    }
+                    
                     $text_color = $visual_width > 50 ? '#fff' : '#000';
                     $html .= '<div style="background: #e1e1e1; width: 100%; height: 20px; border-radius: 10px; overflow: hidden; position: relative;">
                                 <div style="background: #27ae60; width: ' . esc_attr($visual_width) . '%; height: 100%; transition: width 0.5s;"></div>
-                                <span style="position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; color: ' . $text_color . '; line-height: 20px;">
-                                    Chunk: ' . esc_html($percent) . '
+                                <span style="position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; color: ' . $text_color . '; line-height: 20px; white-space: nowrap;">
+                                    ' . esc_html($label) . '
                                 </span>
                               </div>';
                 }
@@ -990,13 +1004,19 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                 if (strpos($item['hash_key'], 'string_job_') === 0) {
                     return '<span style="color:#888;">(Fast String Job)</span>';
                 }
+                
+                $base_url = 'options-general.php?page=freedomtranslate&tab=queue_monitor';
+                if (!empty($_REQUEST['orderby'])) $base_url .= '&orderby=' . sanitize_text_field($_REQUEST['orderby']);
+                if (!empty($_REQUEST['order'])) $base_url .= '&order=' . sanitize_text_field($_REQUEST['order']);
+                if (!empty($_REQUEST['s'])) $base_url .= '&s=' . sanitize_text_field($_REQUEST['s']);
+                
                 $html = '<div style="display: flex; gap: 8px; align-items: center;">';
                 if ($item['status'] === 'pending') {
-                    $start_url = wp_nonce_url(admin_url('options-general.php?page=freedomtranslate&tab=queue_monitor&ft_action=start_job&job_hash=' . $item['hash_key']), 'ft_start_' . $item['hash_key']);
+                    $start_url = wp_nonce_url(admin_url($base_url . '&ft_action=start_job&job_hash=' . $item['hash_key']), 'ft_start_' . $item['hash_key']);
                     $html .= '<a href="' . esc_url($start_url) . '" class="button button-small button-primary" title="Force Start">Start Now</a>';
                 }
 
-                $cancel_url = wp_nonce_url(admin_url('options-general.php?page=freedomtranslate&tab=queue_monitor&ft_action=cancel_job&job_hash=' . $item['hash_key']), 'ft_cancel_' . $item['hash_key']);
+                $cancel_url = wp_nonce_url(admin_url($base_url . '&ft_action=cancel_job&job_hash=' . $item['hash_key']), 'ft_cancel_' . $item['hash_key']);
                 $html .= '<a href="' . esc_url($cancel_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Are you sure you want to cancel this translation job?\');">Cancel</a>';
                 
                 $html .= '</div>';
@@ -1138,6 +1158,7 @@ function freedomtranslate_settings_page() {
         }
         
         $selected_langs = isset($_POST['direct_langs']) ? array_map('sanitize_text_field', wp_unslash($_POST['direct_langs'])) : [];
+        update_option('freedomtranslate_direct_last_langs', $selected_langs);
 
         if ($post_id > 0 && !empty($selected_langs)) {
             $post = get_post($post_id);
@@ -1542,11 +1563,16 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                             <th scope="row">Strict Manual Mode</th>
                             <td>
                                 <label>
-                                    <?php $strict_val = get_option(FREEDOMTRANSLATE_STRICT_MANUAL_OPTION, '0'); ?>
+                                    <?php $strict_val = get_option(FREEDOMTRANSLATE_STRICT_MANUAL_OPTION, '1'); ?>
                                     <input type="checkbox" name="freedomtranslate_strict_manual" value="1" <?php checked($strict_val, '1'); ?>>
-                                    <strong style="color: #d63638;">Disable automatic background translations on page visit</strong>
+                                    <strong style="color: #d63638;">Disable automatic background translations on page visit (Recommended)</strong>
                                 </label>
-                                <p class="description">If checked, translations will ONLY start if you manually push them via the <strong>Direct Translate</strong> tab. Visiting an untranslated page will simply show the original text without waking up the AI server.</p>
+                                <p class="description">If checked, translations will ONLY start if you manually push them via the <strong>Direct Translate</strong> tab.</p>
+                                <?php if ($strict_val === '0'): ?>
+                                    <div class="notice notice-warning inline" style="margin-top: 10px; padding: 10px;">
+                                        <p style="margin: 0;">⚠️ <strong>WARNING:</strong> You have enabled "On-the-fly" automatic translations. If your site has hundreds of posts and multiple languages enabled, an unexpected traffic spike or a bot crawl could overload your local AI server with thousands of background jobs. Use with caution!</p>
+                                    </div>
+                                <?php endif; ?>
                             </td>
                         </tr>
                         <tr>
@@ -1709,11 +1735,14 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                                 <div style="column-count: 3; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 4px; max-width: 600px;">
                                     <?php 
                                     $site_lang = substr(get_locale(), 0, 2);
+                                    // Peschiamo le ultime usate, altrimenti le selezioniamo tutte di default la prima volta
+                                    $last_langs = get_option('freedomtranslate_direct_last_langs', $enabled_languages);
                                     foreach ($enabled_languages as $code): 
                                         if ($code === $site_lang) continue;
+                                        $is_checked = in_array($code, $last_langs, true) ? 'checked' : '';
                                     ?>
                                         <label style="display:block;margin-bottom:5px;">
-                                            <input type="checkbox" name="direct_langs[]" value="<?php echo esc_attr($code); ?>" checked>
+                                            <input type="checkbox" name="direct_langs[]" value="<?php echo esc_attr($code); ?>" <?php echo $is_checked; ?>>
                                             <strong><?php echo esc_html(strtoupper($code)); ?></strong> - <?php echo esc_html($all_languages[$code]); ?>
                                         </label>
                                     <?php endforeach; ?>
@@ -1768,16 +1797,6 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
 
         <?php elseif ($active_tab === 'tools'): ?>
             <h3>Database Cache Management</h3>
-            
-            <div style="background:#f9f9f9; padding:15px; border:1px solid #ccc; margin-bottom:30px;">
-                <h4>Clear Cache for a Single Post/Page</h4>
-                <p class="description">Enter the <strong>Post ID</strong> or the <strong>full URL</strong> of the page you want to clear. The AI will re-translate it automatically on the next visit.</p>
-                <form method="post" style="display:flex; gap:10px; align-items:center; margin-top:10px;">
-                    <?php wp_nonce_field('freedomtranslate_purge_single', 'freedomtranslate_nonce_single'); ?>
-                    <input type="text" name="single_post_input" placeholder="e.g. 123 or https://..." class="regular-text" required style="width: 300px;">
-                    <input type="submit" name="freedomtranslate_purge_single" class="button button-primary" value="Clear Single Cache">
-                </form>
-            </div>
 
             <div style="margin-bottom:30px;">
                 <h4>Clear ALL Cache (Danger Zone)</h4>
