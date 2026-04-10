@@ -987,6 +987,9 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                 }
                 return $html;
             case 'action':
+                if (strpos($item['hash_key'], 'string_job_') === 0) {
+                    return '<span style="color:#888;">(Fast String Job)</span>';
+                }
                 $html = '<div style="display: flex; gap: 8px; align-items: center;">';
                 if ($item['status'] === 'pending') {
                     $start_url = wp_nonce_url(admin_url('options-general.php?page=freedomtranslate&tab=queue_monitor&ft_action=start_job&job_hash=' . $item['hash_key']), 'ft_start_' . $item['hash_key']);
@@ -1033,13 +1036,13 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
         $crons = _get_cron_array();
         if (!empty($crons)) {
             foreach ($crons as $timestamp => $cron_hooks) {
+                
                 if (isset($cron_hooks['freedomtranslate_async_translate'])) {
                     foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
                         $hash_key = $event['args'][0];
                         if (isset($unified_data[$hash_key])) {
                             $unified_data[$hash_key]['scheduled'] = $timestamp;
                         } else {
-                            // Found a cron without a DB entry (Zombie Cron)
                             $unified_data[$hash_key] = [
                                 'hash_key'  => $hash_key,
                                 'post_id'   => isset($event['args'][3]) ? $event['args'][3] : 'Unknown',
@@ -1051,6 +1054,24 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                         }
                     }
                 }
+
+                if (isset($cron_hooks['freedomtranslate_async_string_translate'])) {
+                    foreach ($cron_hooks['freedomtranslate_async_string_translate'] as $sig => $event) {
+                        $string_id = isset($event['args'][0]) ? $event['args'][0] : 'Unknown';
+                        $target_lang = isset($event['args'][3]) ? $event['args'][3] : 'Unknown';
+                        $hash_key = 'string_job_' . $string_id . '_' . $target_lang . '_' . $sig; 
+                        
+                        $unified_data[$hash_key] = [
+                            'hash_key'  => $hash_key,
+                            'post_id'   => 'String: ' . $string_id, // Etichetta speciale per distinguerli
+                            'lang'      => $target_lang,
+                            'status'    => 'pending',
+                            'progress'  => 0,
+                            'scheduled' => $timestamp
+                        ];
+                    }
+                }
+                
             }
         }
 
@@ -1373,10 +1394,12 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
     if ( is_array( $crons ) ) {
         foreach ( $crons as $timestamp => $cron_hooks ) {
             if ( isset( $cron_hooks['freedomtranslate_async_translate'] ) || 
+            isset( $cron_hooks['freedomtranslate_async_string_translate'] ) ||
                  isset( $cron_hooks['freedomtranslate_trigger_prewarm'] ) || 
                  isset( $cron_hooks['freedomtranslate_master_ping'] ) ) {
                 
                 unset( $crons[$timestamp]['freedomtranslate_async_translate'] );
+                unset( $crons[$timestamp]['freedomtranslate_async_string_translate'] );
                 unset( $crons[$timestamp]['freedomtranslate_trigger_prewarm'] );
                 unset( $crons[$timestamp]['freedomtranslate_master_ping'] );
                 if ( empty( $crons[$timestamp] ) ) unset( $crons[$timestamp] );
