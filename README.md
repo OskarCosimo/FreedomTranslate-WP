@@ -56,7 +56,7 @@
 - WordPress 5.x or newer
 - PHP 7.4+
 - **One of the following**:
-  - A local/remote Flask bridge connected to **Ollama** (e.g., running `gemma4:e2b` or similar LLMs).
+  - A local/remote Flask bridge connected to **Ollama** (e.g., running `gemma3n:e2b` or similar LLMs in ollama/library website).
   - A local or remote instance of [LibreTranslate](https://github.com/uav4geo/LibreTranslate) (default: `http://localhost:5000`).
   - Google Cloud Translation API key.
   - Internet connection (for free Google Translate).
