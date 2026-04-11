@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.9.2
+Version: 1.9.3
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -29,6 +29,28 @@ define('FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION',      'freedomtranslate_max_conc
 define('FREEDOMTRANSLATE_PREWARM_OPTION',             'freedomtranslate_prewarm_on_save');
 define('FREEDOMTRANSLATE_CHUNK_SIZE_OPTION',          'freedomtranslate_chunk_size');
 define('FREEDOMTRANSLATE_STRICT_MANUAL_OPTION',       'freedomtranslate_strict_manual');
+
+/**
+ * Send a cancellation request
+ * Fire-and-forget (blocking=false): avoid slow.
+ *
+ * @param string|array $hashkeys
+ */
+function ft_cancel_remote_job( $hashkeys ) {
+    $api_url    = get_option( FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT );
+    $cancel_url = rtrim( preg_replace( '#/translate$#i', '', $api_url ), '/' ) . '/cancel';
+
+    $body = is_array( $hashkeys )
+        ? json_encode( [ 'job_ids' => array_values( $hashkeys ) ] )
+        : json_encode( [ 'job_id'  => $hashkeys ] );
+
+    wp_remote_post( $cancel_url, [
+        'body'     => $body,
+        'headers'  => [ 'Content-Type' => 'application/json' ],
+        'timeout'  => 3,
+        'blocking' => false,
+    ] );
+}
 
 // ========================================================================
 // 1. DATABASE SETUP & CUSTOM CACHE ENGINE
@@ -342,14 +364,19 @@ function freedomtranslate_translate_google_official($text, $source, $target, $fo
         ? $json['data']['translations']['translatedText'] : $text;
 }
 
-function freedomtranslate_translate_libre($text, $source, $target, $format = 'text') {
+function freedomtranslate_translate_libre( $text, $source, $target, $format = 'text', $job_id = '' ) {
     $api_url   = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
     $api_key   = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
 
     $timeout = (int) get_option('freedomtranslate_api_timeout', 120);
 
     $body = ['q'=>$text,'source'=>$source,'target'=>$target,'format'=>$format];
-    if (!empty($api_key)) $body['api_key'] = $api_key;
+    if (!empty( $job_id)) {
+    $body['job_id'] = $job_id;
+    }
+    if (!empty($api_key)) {
+    $body['api_key'] = $api_key;
+    }
     
     $response = wp_remote_post($api_url, ['body'=>$body,'timeout'=>$timeout]);
     if (is_wp_error($response)) return $text;
@@ -565,7 +592,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         if ($service === 'google_official') {
             $translated_chunk = freedomtranslate_translate_google_official($chunks[$done_chunks], $site_lang, $user_lang, 'html');
         } else {
-            $translated_chunk = freedomtranslate_translate_libre($chunks[$done_chunks], $site_lang, $user_lang, 'html');
+            $translated_chunk = freedomtranslate_translate_libre($chunks[ $done_chunks ], $site_lang, $user_lang, 'html', $hash_key);
         }
         
         $chunk_hash = $hash_key . '_chunk_' . $done_chunks;
@@ -1469,6 +1496,7 @@ function freedomtranslate_settings_page() {
             
             $hashes = $wpdb->get_col($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status IN ('pending', 'processing')", $p_id, $lang));
             if (!empty($hashes)) {
+                ft_cancel_remote_job( $hashes ); 
                 foreach($hashes as $h) {
                     $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $h . '_chunk_%'));
                     $wpdb->delete($table, ['hash_key' => $h]);
@@ -1673,6 +1701,14 @@ function freedomtranslate_settings_page() {
 
 if (isset($_POST['freedomtranslate_purge_cron'])) {
     check_admin_referer('freedomtranslate_purge_cron', 'freedomtranslate_nonce_cron');
+
+    $active_hashes = $wpdb->get_col(
+        "SELECT hashkey FROM $table WHERE status IN ('pending','processing')"
+    );
+    if ( ! empty( $active_hashes ) ) {
+        ft_cancel_remote_job( $active_hashes );
+    }
+    
     if (!current_user_can('manage_options')) wp_die('You do not have the permission');
 
     set_transient('ft_kill_switch', '1', 120);
