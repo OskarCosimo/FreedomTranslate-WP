@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.9.3
+Version: 1.9.4
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -540,7 +540,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         $active_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table WHERE status = 'processing'");
         
         if ($active_count >= $max_concurrent) {
-            wp_schedule_single_event(time() + rand(300, 600), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, wp_rand()]);
+            wp_schedule_single_event(time() + rand(300, 600), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, uniqid('', true)]);
             return;
         }
 
@@ -602,7 +602,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'processing', $total_chunks);
 
         if ($done_chunks < $total_chunks && (time() - $start_time) >= $max_execution_time) {
-            wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, wp_rand()]);
+            wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, uniqid('', true)]);
             return; 
         }
     }
@@ -628,8 +628,15 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     ]);
 
     $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $hash_key . '_chunk_%'));
-    
     delete_option('ft_job_' . $hash_key);
+
+    $next_job = $wpdb->get_row("SELECT hash_key, target_lang, post_id FROM $table WHERE status = 'pending' LIMIT 1");
+    if ($next_job) {
+wp_schedule_single_event(time() + 2, 'freedomtranslate_async_translate', [
+$next_job->hash_key, $site_lang, $next_job->target_lang, $next_job->post_id, uniqid('', true)
+]);
+    }
+
 }
 
 function freedomtranslate_split_html_into_chunks($html, $max_chars = 500) {
@@ -711,7 +718,7 @@ function freedomtranslate_filter_post_content($content, $id = null) {
 
             ft_update_progress($active_hash, $current_obj_id, $user_lang, 0, 'pending');
             wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [
-                $active_hash, $site_lang, $user_lang, $current_obj_id, wp_rand()
+                $active_hash, $site_lang, $user_lang, $current_obj_id, uniqid('', true)
             ]);
         }
 
@@ -1382,7 +1389,7 @@ function freedomtranslate_settings_page() {
                         $t_hash = md5("post_{$post_id}_the_title_{$lang}") . '_the_title';
                         $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $t_hash . '_chunk_%')); 
                         ft_update_progress($t_hash, $post_id, $lang, 0, 'pending');
-                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id, wp_rand()]);
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
                         $delay += 2; 
                         $queued_count++;
                     }
@@ -1391,7 +1398,7 @@ function freedomtranslate_settings_page() {
                         $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
                         $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $c_hash . '_chunk_%')); 
                         ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
-                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, wp_rand()]);
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
                         $delay += 3;
                         $queued_count++;
                     }
@@ -1400,7 +1407,7 @@ function freedomtranslate_settings_page() {
                         $e_hash = md5("post_{$post_id}_the_excerpt_{$lang}") . '_the_excerpt';
                         $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $e_hash . '_chunk_%'));
                         ft_update_progress($e_hash, $post_id, $lang, 0, 'pending');
-                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$e_hash, $site_lang, $lang, $post_id, wp_rand()]);
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$e_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
                         $delay += 2;
                         $queued_count++;
                     }
@@ -1437,7 +1444,7 @@ function freedomtranslate_settings_page() {
             if ($job) {
                 $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $hash_key]);
                 $site_lang = substr(get_locale(), 0, 2);
-                $args = [$hash_key, $site_lang, $job->target_lang, (int)$job->post_id, wp_rand()]; 
+                $args = [$hash_key, $site_lang, $job->target_lang, (int)$job->post_id, uniqid('', true)]; 
                 wp_clear_scheduled_hook('freedomtranslate_async_translate', $args);
                 wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
             }
@@ -1482,7 +1489,7 @@ function freedomtranslate_settings_page() {
             if ($job) {
                 $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $job->hash_key]);
                 $site_lang = substr(get_locale(), 0, 2);
-                $args = [$job->hash_key, $site_lang, $lang, $p_id, wp_rand()]; 
+                $args = [$job->hash_key, $site_lang, $lang, $p_id, uniqid('', true)]; 
                 wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
             }
             wp_safe_redirect(add_query_arg('ft_msg', 'started', $clean_url));
@@ -1545,7 +1552,7 @@ function freedomtranslate_settings_page() {
 
                 foreach ($enabled_langs as $lang) {
                     if ($lang === $site_lang) continue;
-                    wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, wp_rand()]);
+                    wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, uniqid('', true)]);
                     $delay += 2; 
                 }
             }
@@ -1659,7 +1666,7 @@ function freedomtranslate_settings_page() {
             foreach ($enabled_langs as $lang) {
                 if ($lang === $site_lang) continue;
 
-                wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, wp_rand()]);
+                wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, uniqid('', true)]);
                 $delay += 1;
                 $queued++;
             }
@@ -2286,7 +2293,7 @@ add_action('save_post', function($post_id) {
             
             if (!$status_data) {
                 ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
-                wp_schedule_single_event(time() + 5, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id]);
+                wp_schedule_single_event(time() + 5, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
             }
         }
 
@@ -2316,6 +2323,27 @@ add_action('freedomtranslate_master_ping', function($post_id) {
         wp_remote_get($ping_url, ['timeout' => 0.1, 'blocking' => false, 'sslverify' => false]);
     }
 });
+
+// ==========================================
+// WATCHDOG QUEUE (SELF-HEALING)
+// ==========================================
+add_filter('cron_schedules', function($schedules) {
+$schedules['ft_five_minutes'] = array('interval' => 300, 'display' => 'Every 5 Minutes');
+return $schedules;
+});
+
+add_action('init', function() {
+if (!wp_next_scheduled('freedomtranslate_queue_watchdog')) {
+wp_schedule_event(time(), 'ft_five_minutes', 'freedomtranslate_queue_watchdog');
+}
+});
+
+add_action('freedomtranslate_queue_watchdog', function() {
+global $wpdb;
+$table = $wpdb->prefix . 'freedomtranslate_cache';
+
+});
+// ==========================================
 
 // Auto-purge cron
 register_activation_hook(__FILE__, function() {
