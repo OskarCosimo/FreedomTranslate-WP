@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.9.4
+Version: 1.9.5
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -76,7 +76,7 @@ function freedomtranslate_install_db() {
 
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
     dbDelta($sql);
-    update_option('freedomtranslate_db_version', '1.3'); // Aggiornato a 1.3 per forzare la modifica
+    update_option('freedomtranslate_db_version', '1.3');
 }
 register_activation_hook(__FILE__, 'freedomtranslate_install_db');
 add_action('admin_init', function() {
@@ -218,6 +218,45 @@ function freedomtranslate_get_all_languages() {
     ];
 }
 
+// ovverride wordpress locale
+add_action('wp_loaded', 'freedomtranslate_force_active_locale');
+
+function freedomtranslate_force_active_locale() {
+    if (is_admin()) {
+        return;
+    }
+
+    $user_lang = '';
+    if (isset($_GET['freedomtranslate_lang'])) {
+        $user_lang = sanitize_text_field(wp_unslash($_GET['freedomtranslate_lang']));
+    } elseif (isset($_COOKIE['freedomtranslate_lang'])) {
+        $user_lang = sanitize_text_field(wp_unslash($_COOKIE['freedomtranslate_lang']));
+    }
+
+    if (empty($user_lang)) {
+        return;
+    }
+
+    $locales_map = [
+        'ar' => 'ar', 'az' => 'az', 'zh' => 'zh_CN', 'cs' => 'cs_CZ',
+        'da' => 'da_DK', 'nl' => 'nl_NL', 'en' => 'en_US', 'fi' => 'fi',
+        'fr' => 'fr_FR', 'de' => 'de_DE', 'el' => 'el', 'he' => 'he_IL',
+        'hi' => 'hi_IN', 'hu' => 'hu_HU', 'id' => 'id_ID', 'ga' => 'ga',
+        'it' => 'it_IT', 'ja' => 'ja', 'ko' => 'ko_KR', 'no' => 'nb_NO',
+        'pl' => 'pl_PL', 'pt' => 'pt_PT', 'ro' => 'ro_RO', 'ru' => 'ru_RU',
+        'sk' => 'sk_SK', 'es' => 'es_ES', 'sv' => 'sv_SE', 'tr' => 'tr_TR',
+        'uk' => 'uk', 'vi' => 'vi',
+    ];
+
+    if (isset($locales_map[$user_lang])) {
+        $target_locale = $locales_map[$user_lang];
+
+        if (get_locale() !== $target_locale) {
+            switch_to_locale($target_locale);
+        }
+    }
+}
+
 // ========================================================================
 // 3. SHORTCODES
 // ========================================================================
@@ -307,18 +346,23 @@ add_shortcode('freedomtranslate_selector', 'freedomtranslate_language_selector_s
 
 add_shortcode('ft_string', function($atts) {
     $atts = shortcode_atts(['id' => ''], $atts, 'ft_string');
-    if (empty($atts['id'])) return '';
-
     $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
-    if (!isset($strings[$atts['id']])) return '';
+    if (empty($atts['id']) || !isset($strings[$atts['id']])) return '';
 
     $user_lang = freedomtranslate_get_user_lang();
-    $site_lang = substr(get_locale(), 0, 2);
+    
+    $site_source_lang = substr(get_option('WPLANG', 'en'), 0, 2);
+    if (empty($site_source_lang)) $site_source_lang = 'en';
 
-    if ($user_lang === $site_lang || !isset($strings[$atts['id']]['translations'][$user_lang])) {
+    if ($user_lang === $site_source_lang) {
         return esc_html($strings[$atts['id']]['original']);
     }
-    return esc_html($strings[$atts['id']]['translations'][$user_lang]);
+
+    if (!empty($strings[$atts['id']]['translations'][$user_lang])) {
+        return esc_html($strings[$atts['id']]['translations'][$user_lang]);
+    }
+
+    return esc_html($strings[$atts['id']]['original']);
 });
 
 
@@ -500,6 +544,7 @@ add_action('freedomtranslate_async_string_translate', 'freedomtranslate_string_w
 
 function freedomtranslate_string_worker($string_id, $text, $site_lang, $target_lang, $rand = 0) {
     if (get_transient('ft_kill_switch')) return;
+    if (empty($string_id) || empty($target_lang)) return;
 
     $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
 
@@ -510,12 +555,47 @@ function freedomtranslate_string_worker($string_id, $text, $site_lang, $target_l
     }
 
     if ($translated !== $text && !empty(trim($translated))) {
+        
+        // MUTEX LOCK: Prevent Data Loss and Race Conditions
+        $lock_name = 'ft_lock_static_strings';
+        $locked = false;
+        $attempts = 0;
+
+                while ($attempts < 40) {
+    if (false === get_transient($lock_name)) {
+        set_transient($lock_name, '1', 10);
+        $locked = true;
+        break;
+    }
+    usleep(50000); 
+    $attempts++;
+                        }
+
+        // Force WordPress to bypass object cache and read fresh DB data
+        wp_cache_delete(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, 'options');
         $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
         
-        // Ci assicuriamo che l'ID esista ancora
-        if (isset($strings[$string_id])) {
-            $strings[$string_id]['translations'][$target_lang] = $translated;
-            update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
+        if (!is_array($strings)) {
+            $strings = [];
+        }
+
+        // If the string was accidentally deleted by an un-locked process, recreate it on the fly
+        if (!isset($strings[$string_id])) {
+            $strings[$string_id] = [
+                'original' => $text,
+                'translations' => []
+            ];
+        }
+        
+        // Add the new translation
+        $strings[$string_id]['translations'][$target_lang] = $translated;
+        
+        // Commit changes securely
+        update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
+
+        // Release the lock for the next process
+        if ($locked) {
+            delete_transient($lock_name);
         }
     }
 }
@@ -679,6 +759,15 @@ add_action('wp_ajax_freedomtranslate_check_ready',        'freedomtranslate_ajax
 
 function freedomtranslate_filter_post_content($content, $id = null) {
     if (is_admin()) return $content;
+    
+    $site_source_lang = substr(get_option('WPLANG', 'en'), 0, 2);
+    if (empty($site_source_lang)) $site_source_lang = 'en'; 
+
+    $user_lang = freedomtranslate_get_user_lang();
+
+    if ($user_lang === $site_source_lang) return $content;
+
+
     if (defined('REST_REQUEST') && REST_REQUEST) return $content;
     if (function_exists('wp_is_json_request') && wp_is_json_request()) return $content;
     if (!is_string($content) || trim($content) === '') return $content;
@@ -715,11 +804,17 @@ function freedomtranslate_filter_post_content($content, $id = null) {
                 return $content; 
             }
             // --------------------------------
-
-            ft_update_progress($active_hash, $current_obj_id, $user_lang, 0, 'pending');
-            wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [
-                $active_hash, $site_lang, $user_lang, $current_obj_id, uniqid('', true)
-            ]);
+            
+            // ANTI-DDOS LOCK
+            $lock_key = 'ft_lock_' . md5($active_hash);
+            if (false === get_transient($lock_key)) {
+                set_transient($lock_key, true, 60);
+                
+                ft_update_progress($active_hash, $current_obj_id, $user_lang, 0, 'pending');
+                wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [
+                    $active_hash, $site_lang, $user_lang, $current_obj_id, uniqid('', true)
+                ]);
+            }
         }
 
         return $content;
@@ -862,8 +957,7 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
 
     public function get_columns() {
         return [
-            'post_id' => 'Post ID',
-            'title'   => 'Title',
+            'post_id' => 'Post Info',
             'langs'   => 'Cached Languages',
             'action'  => 'Action'
         ];
@@ -876,71 +970,17 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
     }
 
     public function column_default($item, $column_name) {
-        $group_key = isset($item['group_key']) ? $item['group_key'] : 'group_' . $item['post_id'] . '_' . $item['lang'];
-        $safe_id = md5($group_key);
-        $is_string = strpos($group_key, 'string_job_') === 0;
-
         switch ($column_name) {
             case 'post_id':
-                if ($item['post_id'] === 'Unknown' || $is_string) return '<strong>' . esc_html($item['post_id']) . '</strong>';
-                return '<strong>' . esc_html($item['post_id']) . '</strong> <a href="' . get_edit_post_link($item['post_id']) . '" target="_blank">(Edit)</a>';
-            case 'lang':
-                return '<strong>' . esc_html(strtoupper($item['lang'])) . '</strong>';
-            case 'scheduled':
-                if ($item['status'] === 'processing') return '<strong style="color:#27ae60;">Currently Executing ⚙️</strong>';
-                if ($item['scheduled'] === 0) return '<span style="color:#d63638; font-weight:bold;">Missing Cron</span>';
-                $time_diff = $item['scheduled'] - time();
-                if ($time_diff <= 0) return '<strong style="color:#2271b1;">Queued</strong>';
-                return 'In ' . human_time_diff(time(), $item['scheduled']);
-            case 'status':
-                $bg_color = ($item['status'] === 'pending') ? '#f0b849' : (($item['status'] === 'processing') ? '#2271b1' : '#72777c');
-                $status_label = strtoupper($item['status']);
-                if ($item['status'] === 'cron_only') $status_label = 'ZOMBIE CRON';
-                
-                $html = '<div style="margin-bottom: 5px;" id="ft_status_wrap_' . $safe_id . '"><span id="ft_status_badge_' . $safe_id . '" style="background: ' . $bg_color . '; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">' . esc_html($status_label) . '</span></div>';
-                
-                if (in_array($item['status'], ['pending', 'processing'])) {
-                    $percent = 0;
-                    $visual_width = 5;
-                    $label = 'Chunk: ' . $item['progress'] . ' / ? (Waiting...)';
-                    
-                    if (isset($item['total_chunks']) && $item['total_chunks'] > 0) {
-                        $percent = round(($item['progress'] / $item['total_chunks']) * 100);
-                        $visual_width = max(5, $percent);
-                        $label = 'Chunk: ' . $item['progress'] . ' / ' . $item['total_chunks'] . ' (' . $percent . '%)';
-                    }
-                    
-                    $text_color = $visual_width > 50 ? '#fff' : '#000';
-                    $html .= '<div style="background: #e1e1e1; width: 100%; height: 20px; border-radius: 10px; overflow: hidden; position: relative;">
-                                <div id="ft_bar_fill_' . $safe_id . '" style="background: #27ae60; width: ' . esc_attr($visual_width) . '%; height: 100%; transition: width 0.5s;"></div>
-                                <span id="ft_bar_text_' . $safe_id . '" style="position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; color: ' . $text_color . '; line-height: 20px; white-space: nowrap;">
-                                    ' . esc_html($label) . '
-                                </span>
-                              </div>';
-                }
-                return $html;
+                $edit_link = get_edit_post_link($item['post_id']);
+                $title_html = !empty($item['title']) ? esc_html($item['title']) : '(No Title)';
+                return '<strong>ID: ' . esc_html($item['post_id']) . '</strong><br>' . $title_html . ' <a href="' . $edit_link . '" target="_blank">(Edit)</a>';
+            case 'langs':
+                return '<strong>' . esc_html(strtoupper(implode(', ', $item['langs']))) . '</strong>';
             case 'action':
-                if ($is_string) return '<span style="color:#888;">(Fast String Job)</span>';
-                
-                $base_url = 'options-general.php?page=freedomtranslate&tab=queue_monitor';
-                if (!empty($_REQUEST['orderby'])) $base_url .= '&orderby=' . sanitize_text_field($_REQUEST['orderby']);
-                if (!empty($_REQUEST['order'])) $base_url .= '&order=' . sanitize_text_field($_REQUEST['order']);
-                if (!empty($_REQUEST['s'])) $base_url .= '&s=' . sanitize_text_field($_REQUEST['s']);
-                
-                $action_suffix = '&post_id=' . $item['post_id'] . '&lang=' . $item['lang'];
-                $nonce_key = 'ft_group_' . $item['post_id'] . '_' . $item['lang'];
-                
-                $html = '<div style="display: flex; gap: 8px; align-items: center;">';
-                if ($item['status'] === 'pending') {
-                    $start_url = wp_nonce_url(admin_url($base_url . '&ft_action=start_group' . $action_suffix), $nonce_key);
-                    $html .= '<a href="' . esc_url($start_url) . '" class="button button-small button-primary" title="Force Start">Start Now</a>';
-                }
-
-                $cancel_url = wp_nonce_url(admin_url($base_url . '&ft_action=cancel_group' . $action_suffix), $nonce_key);
-                $html .= '<a href="' . esc_url($cancel_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Are you sure you want to cancel ALL translation parts for this post?\');">Cancel</a>';
-                
-                $html .= '</div>';
-                return $html;
+                $base_url = 'options-general.php?page=freedomtranslate&tab=tools';
+                $delete_url = wp_nonce_url(admin_url($base_url . '&ft_action=delete_cache&post_id=' . $item['post_id']), 'ft_del_cache_' . $item['post_id']);
+                return '<a href="' . esc_url($delete_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Sei sicuro di voler svuotare la cache per questo specifico post?\');">Clear Cache</a>';
             default:
                 return '';
         }
@@ -955,66 +995,22 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
         global $wpdb;
         $table = $wpdb->prefix . 'freedomtranslate_cache';
         
-        $db_jobs = $wpdb->get_results("SELECT * FROM $table WHERE status IN ('pending', 'processing')");
+        // RECUPERA SOLO I COMPLETATI
+        $db_jobs = $wpdb->get_results("SELECT post_id, target_lang FROM $table WHERE status = 'completed'");
         $unified_data = [];
 
         foreach ($db_jobs as $job) {
-            $is_string = (strpos($job->hash_key, 'string_job_') === 0);
-            $group_key = $is_string ? $job->hash_key : 'group_' . $job->post_id . '_' . $job->target_lang;
+            if (empty($job->post_id)) continue;
 
-            if (!isset($unified_data[$group_key])) {
-                $unified_data[$group_key] = [
-                    'group_key'    => $group_key,
-                    'hash_key'     => $job->hash_key,
-                    'post_id'      => $job->post_id,
-                    'lang'         => $job->target_lang,
-                    'status'       => $job->status,
-                    'progress'     => (int)$job->progress,
-                    'total_chunks' => (int)$job->total_chunks,
-                    'scheduled'    => 0
+            if (!isset($unified_data[$job->post_id])) {
+                $unified_data[$job->post_id] = [
+                    'post_id' => $job->post_id,
+                    'title'   => get_the_title($job->post_id),
+                    'langs'   => [$job->target_lang]
                 ];
             } else {
-                $unified_data[$group_key]['progress'] += (int)$job->progress;
-                $unified_data[$group_key]['total_chunks'] += (int)$job->total_chunks;
-                if ($job->status === 'processing') {
-                    $unified_data[$group_key]['status'] = 'processing';
-                }
-            }
-        }
-
-        $crons = _get_cron_array();
-        if (!empty($crons)) {
-            foreach ($crons as $timestamp => $cron_hooks) {
-                if (isset($cron_hooks['freedomtranslate_async_translate'])) {
-                    foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                        $hash_key = $event['args'][0];
-                        $post_id = isset($event['args'][3]) ? $event['args'][3] : 'Unknown';
-                        $lang = isset($event['args'][2]) ? $event['args'][2] : 'Unknown';
-                        $group_key = 'group_' . $post_id . '_' . $lang;
-
-                        if (isset($unified_data[$group_key])) {
-                            if ($unified_data[$group_key]['scheduled'] === 0 || $timestamp < $unified_data[$group_key]['scheduled']) {
-                                $unified_data[$group_key]['scheduled'] = $timestamp;
-                            }
-                        } else {
-                            $unified_data[$group_key] = [
-                                'group_key' => $group_key, 'hash_key' => $hash_key, 'post_id' => $post_id,
-                                'lang' => $lang, 'status' => 'cron_only', 'progress' => 0, 'total_chunks' => 0, 'scheduled' => $timestamp
-                            ];
-                        }
-                    }
-                }
-                if (isset($cron_hooks['freedomtranslate_async_string_translate'])) {
-                    foreach ($cron_hooks['freedomtranslate_async_string_translate'] as $sig => $event) {
-                        $string_id = isset($event['args'][0]) ? $event['args'][0] : 'Unknown';
-                        $target_lang = isset($event['args'][3]) ? $event['args'][3] : 'Unknown';
-                        $hash_key = 'string_job_' . $string_id . '_' . $target_lang . '_' . $sig; 
-                        
-                        $unified_data[$hash_key] = [
-                            'group_key' => $hash_key, 'hash_key' => $hash_key, 'post_id' => 'String: ' . $string_id,
-                            'lang' => $target_lang, 'status' => 'pending', 'progress' => 0, 'total_chunks' => 0, 'scheduled' => $timestamp
-                        ];
-                    }
+                if (!in_array($job->target_lang, $unified_data[$job->post_id]['langs'])) {
+                    $unified_data[$job->post_id]['langs'][] = $job->target_lang;
                 }
             }
         }
@@ -1024,12 +1020,12 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
         $search_query = isset($_REQUEST['s']) ? sanitize_text_field(wp_unslash($_REQUEST['s'])) : '';
         if (!empty($search_query)) {
             $data = array_filter($data, function($item) use ($search_query) {
-                return (stripos($item['post_id'], $search_query) !== false || stripos($item['lang'], $search_query) !== false);
+                return (stripos($item['post_id'], $search_query) !== false || stripos($item['title'], $search_query) !== false);
             });
         }
 
-        $orderby = isset($_REQUEST['orderby']) ? sanitize_text_field($_REQUEST['orderby']) : 'scheduled';
-        $order = isset($_REQUEST['order']) ? sanitize_text_field($_REQUEST['order']) : 'asc';
+        $orderby = isset($_REQUEST['orderby']) ? sanitize_text_field($_REQUEST['orderby']) : 'post_id';
+        $order = isset($_REQUEST['order']) ? sanitize_text_field($_REQUEST['order']) : 'desc';
         usort($data, function($a, $b) use ($orderby, $order) {
             $result = ($a[$orderby] == $b[$orderby]) ? 0 : (($a[$orderby] < $b[$orderby]) ? -1 : 1);
             return ($order === 'asc') ? $result : -$result;
@@ -1118,24 +1114,16 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
             case 'action':
                 if ($is_string) return '<span style="color:#888;">(Fast String Job)</span>';
                 
-                $base_url = 'options-general.php?page=freedomtranslate&tab=queue_monitor';
-                if (!empty($_REQUEST['orderby'])) $base_url .= '&orderby=' . sanitize_text_field($_REQUEST['orderby']);
-                if (!empty($_REQUEST['order'])) $base_url .= '&order=' . sanitize_text_field($_REQUEST['order']);
-                if (!empty($_REQUEST['s'])) $base_url .= '&s=' . sanitize_text_field($_REQUEST['s']);
-                
-                $action_suffix = '&post_id=' . $item['post_id'] . '&lang=' . $item['lang'];
-                $nonce_key = 'ft_group_' . $item['post_id'] . '_' . $item['lang'];
-                
+                $nonce_val = wp_create_nonce('ft_queue_action');
                 $html = '<div style="display: flex; gap: 8px; align-items: center;">';
+                
                 if ($item['status'] === 'pending') {
-                    $start_url = wp_nonce_url(admin_url($base_url . '&ft_action=start_group' . $action_suffix), $nonce_key);
-                    $html .= '<a href="' . esc_url($start_url) . '" class="button button-small button-primary" title="Force Start">Start Now</a>';
+                    $html .= '<button class="button button-small button-primary ft-ajax-start" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">Start Now</button>';
                 }
 
-                $cancel_url = wp_nonce_url(admin_url($base_url . '&ft_action=cancel_group' . $action_suffix), $nonce_key);
-                $html .= '<a href="' . esc_url($cancel_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Are you sure you want to cancel ALL translation parts for this post?\');">Cancel</a>';
-                
+                $html .= '<button class="button button-small ft-ajax-cancel" style="color: #d63638; border-color: #d63638;" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">Cancel</button>';
                 $html .= '</div>';
+                
                 return $html;
             default:
                 return '';
@@ -1272,7 +1260,8 @@ class FreedomTranslate_Strings_Table extends WP_List_Table {
                 return esc_html($item['original']);
             case 'translations':
                 $color = ($item['done_count'] >= $item['expected_count']) ? '#27ae60' : '#d63638';
-                return '<strong style="color: ' . $color . ';">' . $item['done_count'] . ' / ' . $item['expected_count'] . '</strong>';
+                $langs_list = empty($item['translated_langs']) ? 'Nessuna' : strtoupper(implode(', ', $item['translated_langs']));
+                return '<strong style="color: ' . $color . '; cursor: help; border-bottom: 1px dotted ' . $color . ';" title="Translated languages: ' . esc_attr($langs_list) . '">' . $item['done_count'] . ' / ' . $item['expected_count'] . '</strong>';
             case 'shortcode':
                 return '<code>[ft_string id="' . esc_attr($item['id']) . '"]</code>';
             case 'action':
@@ -1313,7 +1302,8 @@ class FreedomTranslate_Strings_Table extends WP_List_Table {
                 'id'             => $id,
                 'original'       => $sdata['original'],
                 'done_count'     => $done_count,
-                'expected_count' => $expected_count
+                'expected_count' => $expected_count,
+                'translated_langs' => isset($sdata['translations']) ? array_keys($sdata['translations']) : []
             ];
         }
 
@@ -1345,6 +1335,50 @@ class FreedomTranslate_Strings_Table extends WP_List_Table {
         ]);
     }
 }
+
+add_action('admin_init', function() {
+    if (isset($_POST['freedomtranslate_save_static_string'])) {
+        check_admin_referer('freedomtranslate_save_static_string', 'freedomtranslate_nonce_static');
+        
+        $id = sanitize_key($_POST['new_string_id']);
+        $text = sanitize_textarea_field($_POST['new_string_text']);
+        
+        if (!empty($id) && !empty($text)) {
+            $lock_name = 'ft_lock_static_strings';
+            $locked = false; $attempts = 0;
+            while ($attempts < 40) {
+                if (false === get_transient($lock_name)) {
+                    set_transient($lock_name, '1', 10);
+                    $locked = true; break; 
+                }
+                usleep(50000); $attempts++;
+            }
+
+            wp_cache_delete(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, 'options');
+            $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
+            if (!is_array($strings)) { $strings = []; }
+
+            $strings[$id] = ['original' => $text, 'translations' => []];
+            update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
+            if ($locked) delete_transient($lock_name);
+            
+            $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
+            $site_lang = substr(get_option('WPLANG', 'en'), 0, 2); 
+            if(empty($site_lang)) $site_lang = 'en';
+
+            $delay = 0;
+            foreach ($enabled_langs as $lang) {
+                if ($lang === $site_lang) continue;
+
+                wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, uniqid('', true)]);
+                $delay += 2;
+            }
+
+            wp_redirect(admin_url('options-general.php?page=freedomtranslate&tab=static_strings&ft_msg=string_saved'));
+            exit;
+        }
+    }
+});
 
 function freedomtranslate_settings_page() {
     if (!current_user_can('manage_options')) wp_die(esc_html__('You do not have sufficient permissions to access this page.'));
@@ -1428,6 +1462,7 @@ function freedomtranslate_settings_page() {
         elseif ($msg === 'deleted_cache') echo '<div class="notice notice-success is-dismissible"><p>Cache cleared successfully.</p></div>';
         elseif ($msg === 'retranslated') echo '<div class="notice notice-success is-dismissible"><p>String queued for retranslation!</p></div>';
         elseif ($msg === 'deleted_string') echo '<div class="notice notice-success is-dismissible"><p>String deleted.</p></div>';
+        elseif ($msg === 'string_saved') echo '<div class="notice notice-success is-dismissible"><p>String saved and queued for translation!</p></div>';
     }
 
     // --- HANDLERS: START, CANCEL, DELETE & STRINGS (VIA GET) ---
@@ -1448,7 +1483,7 @@ function freedomtranslate_settings_page() {
                 wp_clear_scheduled_hook('freedomtranslate_async_translate', $args);
                 wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
             }
-            wp_safe_redirect(add_query_arg('ft_msg', 'started', $clean_url));
+            echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'started', $clean_url)) . '";</script>';
             exit;
         }
         
@@ -1476,7 +1511,7 @@ function freedomtranslate_settings_page() {
                 }
                 if ($changed) update_option('cron', $crons);
             }
-            wp_safe_redirect(add_query_arg('ft_msg', 'cancelled', $clean_url));
+            echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'cancelled', $clean_url)) . '";</script>';
             exit;
         }
 
@@ -1492,7 +1527,7 @@ function freedomtranslate_settings_page() {
                 $args = [$job->hash_key, $site_lang, $lang, $p_id, uniqid('', true)]; 
                 wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
             }
-            wp_safe_redirect(add_query_arg('ft_msg', 'started', $clean_url));
+            echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'started', $clean_url)) . '";</script>';
             exit;
         }
         
@@ -1525,7 +1560,7 @@ function freedomtranslate_settings_page() {
                     if ($changed) update_option('cron', $crons);
                 }
             }
-            wp_safe_redirect(add_query_arg('ft_msg', 'cancelled', $clean_url));
+            echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'cancelled', $clean_url)) . '";</script>';
             exit;
         }
         
@@ -1535,7 +1570,7 @@ function freedomtranslate_settings_page() {
             if ($post_id > 0) {
                 $wpdb->delete($table, ['post_id' => $post_id]);
             }
-            wp_safe_redirect(add_query_arg('ft_msg', 'deleted_cache', $clean_url));
+            echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'deleted_cache', $clean_url)) . '";</script>';
             exit;
         }
 
@@ -1546,17 +1581,24 @@ function freedomtranslate_settings_page() {
             $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
             if (isset($strings[$id])) {
                 $text = $strings[$id]['original'];
-                $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
-                $site_lang = substr(get_locale(), 0, 2);
-                $delay = 0;
+                // Queue translations for all enabled languages with a slight delay
+            $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
+            $site_lang = substr(get_locale(), 0, 2);
+            $delay = 0; // Start with no delay
 
-                foreach ($enabled_langs as $lang) {
-                    if ($lang === $site_lang) continue;
-                    wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, uniqid('', true)]);
-                    $delay += 2; 
-                }
+            foreach ($enabled_langs as $lang) {
+                if ($lang === $site_lang) continue;
+                
+                wp_schedule_single_event(
+                    time() + $delay, 
+                    'freedomtranslate_async_string_translate', 
+                    [$id, $text, $site_lang, $lang, uniqid('', true)]
+                );
+                
+                $delay += 2; // Increment delay by 2 seconds for each language
             }
-            wp_safe_redirect(add_query_arg('ft_msg', 'retranslated', $clean_url));
+            }
+            echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'retranslated', $clean_url)) . '";</script>';
             exit;
         }
         
@@ -1569,7 +1611,7 @@ function freedomtranslate_settings_page() {
                 unset($strings[$id]);
                 update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
             }
-            wp_safe_redirect(add_query_arg('ft_msg', 'deleted_string', $clean_url));
+            echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'deleted_string', $clean_url)) . '";</script>';
             exit;
         }
     }
@@ -1641,40 +1683,6 @@ function freedomtranslate_settings_page() {
         echo '<div class="notice notice-success"><p>Enabled languages saved.</p></div>';
     }
 
-    if (isset($_POST['freedomtranslate_save_static_string'])) {
-        check_admin_referer('freedomtranslate_save_static_string', 'freedomtranslate_nonce_static');
-        
-        $id = sanitize_key($_POST['new_string_id']);
-        $text = sanitize_textarea_field($_POST['new_string_text']);
-        
-        if (!empty($id) && !empty($text)) {
-            $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
-            
-            if (!isset($strings[$id])) {
-                $strings[$id] = ['original' => $text, 'translations' => []];
-            } else {
-                $strings[$id]['original'] = $text; // Aggiorna il testo se esiste già
-            }
-            update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
-            
-            $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
-            $site_lang = substr(get_locale(), 0, 2);
-            
-            $queued = 0;
-            $delay = 0;
-
-            foreach ($enabled_langs as $lang) {
-                if ($lang === $site_lang) continue;
-
-                wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, uniqid('', true)]);
-                $delay += 1;
-                $queued++;
-            }
-            
-            echo '<div class="notice notice-success"><p>String saved instantly! <strong>' . $queued . '</strong> background translation tasks have been queued. Refresh the page in a few minutes to see them populated.</p></div>';
-        }
-    }
-
     if (isset($_POST['freedomtranslate_purge_single'])) {
         check_admin_referer('freedomtranslate_purge_single', 'freedomtranslate_nonce_single');
         $input = sanitize_text_field(wp_unslash($_POST['single_post_input']));
@@ -1710,7 +1718,7 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
     check_admin_referer('freedomtranslate_purge_cron', 'freedomtranslate_nonce_cron');
 
     $active_hashes = $wpdb->get_col(
-        "SELECT hashkey FROM $table WHERE status IN ('pending','processing')"
+        "SELECT hash_key FROM $table WHERE status IN ('pending','processing')"
     );
     if ( ! empty( $active_hashes ) ) {
         ft_cancel_remote_job( $active_hashes );
@@ -1749,6 +1757,45 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
 
     echo '<div class="notice notice-success"><p>🚨 PANIC BUTTON ACTIVATED: All active background workers killed, queue cleared, and half-baked translations removed from the database.</p></div>';
 }
+
+    if (isset($_POST['freedomtranslate_repair_strings'])) {
+        check_admin_referer('freedomtranslate_repair_strings', 'freedomtranslate_nonce_repair');
+        $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
+        $repaired_count = 0;
+
+        if (!is_array($strings)) {
+            $strings = [];
+            $repaired_count = 1;
+        } else {
+            foreach ($strings as $id => &$sdata) {
+                if (!isset($sdata['original'])) {
+                    unset($strings[$id]);
+                    $repaired_count++;
+                } elseif (isset($sdata['translations']) && is_array($sdata['translations'])) {
+                    // Remove ghost languages
+                    foreach ($sdata['translations'] as $lang => $trans) {
+                        if (is_numeric($lang) || trim($trans) === '') {
+                            unset($sdata['translations'][$lang]);
+                            $repaired_count++;
+                        }
+                    }
+                }
+            }
+        }
+        update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
+        echo '<div class="notice notice-success is-dismissible"><p>🛠️ <strong>Repair Complete!</strong> ' . $repaired_count . ' corrupted elements were removed from the array.</p></div>';
+    }
+
+    // --- PURGE ALL STATIC STRINGS HANDLER ---
+    if (isset($_POST['freedomtranslate_purge_strings'])) {
+        check_admin_referer('freedomtranslate_purge_strings', 'freedomtranslate_nonce_purge_strings');
+        
+        delete_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION);
+        
+        wp_cache_delete(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, 'options');
+        
+        echo '<div class="notice notice-success is-dismissible"><p>🗑️ <strong>All static strings and translations have been permanently deleted.</strong></p></div>';
+    }
 
     if (isset($_POST['freedomtranslate_delete_single_cron'])) {
         check_admin_referer('freedomtranslate_delete_single_cron', 'freedomtranslate_nonce_single_cron');
@@ -1995,8 +2042,24 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
             </form>
 
         <?php elseif ($active_tab === 'static_strings'): ?>
-            <h3>Global Static Strings Manager</h3>
-            <p class="description">Use this to translate global theme elements (like headers, footers, or widgets) once and for all, without querying the AI server on page load.</p>
+            
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px;">
+                <h3 style="margin: 0;">Global Static Strings Manager</h3>
+                
+                <div style="display: flex; gap: 10px;">
+                    <form method="post" onsubmit="return confirm('Are you sure you want to run the repair tool?');">
+                        <?php wp_nonce_field('freedomtranslate_repair_strings', 'freedomtranslate_nonce_repair'); ?>
+                        <input type="submit" name="freedomtranslate_repair_strings" class="button button-secondary" value="🛠️ Repair Strings">
+                    </form>
+
+                    <form method="post" onsubmit="return confirm('⚠️ ATTENTION! ⚠️\n\nThis will PERMANENTLY DELETE all your strings and their translations from the database.\n\nThis action cannot be undone. Are you absolutely sure?');">
+                        <?php wp_nonce_field('freedomtranslate_purge_strings', 'freedomtranslate_nonce_purge_strings'); ?>
+                        <input type="submit" name="freedomtranslate_purge_strings" class="button button-secondary" style="color: #d63638; border-color: #d63638;" value="🗑️ Purge All Strings">
+                    </form>
+                </div>
+            </div>
+            
+            <p class="description" style="margin-top: 10px;">Use this to translate global theme elements once and for all.</p>
             
             <div style="background:#f9f9f9; padding:15px; border:1px solid #ccc; margin-bottom:20px;">
                 <h4>Add New String</h4>
@@ -2061,7 +2124,6 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                                 <div style="column-count: 3; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 4px; max-width: 600px;">
                                     <?php 
                                     $site_lang = substr(get_locale(), 0, 2);
-                                    // Peschiamo le ultime usate, altrimenti le selezioniamo tutte di default la prima volta
                                     $last_langs = get_option('freedomtranslate_direct_last_langs', $enabled_languages);
                                     foreach ($enabled_languages as $code): 
                                         if ($code === $site_lang) continue;
@@ -2121,59 +2183,117 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
             }
             ?>
             <script>
-            document.addEventListener("DOMContentLoaded", function() {
-                var ajaxUrl = "<?php echo admin_url('admin-ajax.php'); ?>";
-                setInterval(function() {
-                    var xhr = new XMLHttpRequest();
-                    xhr.open('GET', ajaxUrl + '?action=ft_queue_monitor_data', true);
-                    xhr.onload = function() {
-                        if (xhr.status === 200) {
-                            try {
-                                var data = JSON.parse(xhr.responseText);
-                                var needsReload = false;
-                                
-                                var wrappers = document.querySelectorAll('div[id^="ft_status_wrap_"]');
-                                wrappers.forEach(function(wrap) {
-                                    var safe_id = wrap.id.replace('ft_status_wrap_', '');
+document.addEventListener("DOMContentLoaded", function() {
+    var ajaxUrl = "<?php echo admin_url('admin-ajax.php'); ?>";
 
-                                    if (!data[safe_id]) {
-                                        needsReload = true;
-                                        return;
-                                    }
-                                    
-                                    var job = data[safe_id];
-                                    
-                                    var badge = document.getElementById('ft_status_badge_' + safe_id);
-                                    if (badge) {
-                                        badge.textContent = job.s.toUpperCase();
-                                        badge.style.background = (job.s === 'pending') ? '#f0b849' : ((job.s === 'processing') ? '#2271b1' : '#72777c');
-                                    }
-                                    
-                                    var barFill = document.getElementById('ft_bar_fill_' + safe_id);
-                                    var barText = document.getElementById('ft_bar_text_' + safe_id);
-                                    
-                                    if (barFill && barText) {
-                                        var visual_width = 5;
-                                        var label = 'Chunk: ' + job.p + ' / ? (Waiting...)';
-                                        if (job.t > 0) {
-                                            var percent = Math.round((job.p / job.t) * 100);
-                                            visual_width = Math.max(5, percent);
-                                            label = 'Chunk: ' + job.p + ' / ' + job.t + ' (' + percent + '%)';
-                                        }
-                                        barFill.style.width = visual_width + '%';
-                                        barText.textContent = label;
-                                        barText.style.color = (visual_width > 50) ? '#fff' : '#000';
-                                    }
-                                });
-                                
-                                if (needsReload) window.location.reload();
-                            } catch(e) {}
-                        }
-                    };
-                    xhr.send();
-                }, 3000);
+    document.body.addEventListener('click', function(e) {
+        if (e.target.classList.contains('ft-ajax-start') || e.target.classList.contains('ft-ajax-cancel')) {
+            e.preventDefault();
+            var btn = e.target;
+            var action = btn.classList.contains('ft-ajax-start') ? 'ft_queue_start' : 'ft_queue_cancel';
+
+            if (action === 'ft_queue_cancel' && !confirm('Sei sicuro di voler cancellare questa traduzione?')) return;
+
+            btn.disabled = true;
+            btn.textContent = '...';
+
+            var formData = new FormData();
+            formData.append('action', action);
+            formData.append('post_id', btn.getAttribute('data-post'));
+            formData.append('lang', btn.getAttribute('data-lang'));
+            formData.append('nonce', btn.getAttribute('data-nonce'));
+
+            fetch(ajaxUrl, { method: 'POST', body: formData })
+            .then(res => res.json())
+            .then(data => {
+                if (action === 'ft_queue_start' && data.success) btn.remove();
             });
-            </script>
+        }
+    });
+
+    var hasTableOnLoad = document.querySelector('.wp-list-table') !== null;
+
+    // Loop della progress bar
+    setInterval(function() {
+        if (!hasTableOnLoad) return; 
+
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', ajaxUrl + '?action=ft_queue_monitor_data&_t=' + new Date().getTime(), true);
+        xhr.onload = function() {
+            if (xhr.status === 200) {
+                try {
+                    var data = JSON.parse(xhr.responseText);
+                    var activeCount = Object.keys(data).length;
+ 
+                    if (activeCount === 0) {
+                        window.location.reload();
+                        return;
+                    }
+
+                    var displayNums = document.querySelectorAll('.displaying-num');
+                    displayNums.forEach(function(num) {
+                        num.textContent = activeCount + (activeCount === 1 ? ' item' : ' items');
+                    });
+
+                    var totalPages = Math.ceil(activeCount / 15);
+                    var pageDisplays = document.querySelectorAll('.total-pages');
+                    pageDisplays.forEach(function(p) {
+                        p.textContent = totalPages.toString();
+                    });
+
+                    if (totalPages <= 1) {
+                        var tablenav = document.querySelectorAll('.tablenav-pages');
+                        tablenav.forEach(function(nav) {
+                            nav.classList.add('one-page');
+                            var links = nav.querySelector('.pagination-links');
+                            if (links) links.style.display = 'none';
+                        });
+                    }
+
+                    var wrappers = document.querySelectorAll('div[id^="ft_status_wrap_"]');
+                    wrappers.forEach(function(wrap) {
+                        var safe_id = wrap.id.replace('ft_status_wrap_', '');
+
+                        if (!data[safe_id]) {
+                            var row = wrap.closest('tr');
+                            if (row && row.style.opacity !== '0.2') {
+                                row.style.transition = 'opacity 0.6s ease';
+                                row.style.opacity = '0.2';
+                                setTimeout(function(){ row.style.display = 'none'; }, 600);
+                            }
+                            return;
+                        }
+                        
+                        var job = data[safe_id];
+                        var badge = document.getElementById('ft_status_badge_' + safe_id);
+                        if (badge) {
+                            badge.textContent = job.s.toUpperCase();
+                            badge.style.background = (job.s === 'pending') ? '#f0b849' : ((job.s === 'processing') ? '#2271b1' : '#72777c');
+                        }
+                        
+                        var barFill = document.getElementById('ft_bar_fill_' + safe_id);
+                        var barText = document.getElementById('ft_bar_text_' + safe_id);
+                        
+                        if (barFill && barText) {
+                            var visual_width = 5;
+                            var label = 'Chunk: ' + job.p + ' / ? (Waiting...)';
+                            if (job.t > 0) {
+                                var percent = Math.round((job.p / job.t) * 100);
+                                visual_width = Math.max(5, percent);
+                                label = 'Chunk: ' + job.p + ' / ' + job.t + ' (' + percent + '%)';
+                            }
+                            barFill.style.width = visual_width + '%';
+                            barText.textContent = label;
+                            barText.style.color = (visual_width > 50) ? '#fff' : '#000';
+                        }
+                    });
+                } catch(e) {}
+            }
+        };
+        xhr.send();
+    }, 3000);
+});
+</script>
 
         <?php elseif ($active_tab === 'tools'): ?>
             <h3>Database Cache Management</h3>
@@ -2405,6 +2525,8 @@ add_action('wp_footer', function() {
 add_action('wp_ajax_ft_queue_monitor_data', function() {
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
+    
+    // Fetch active jobs from the custom database table
     $db_jobs = $wpdb->get_results("SELECT hash_key, post_id, target_lang, status, progress, total_chunks FROM $table WHERE status IN ('pending', 'processing')");
     $unified = [];
     
@@ -2425,5 +2547,134 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
             if ($job->status === 'processing') $unified[$safe_id]['s'] = 'processing';
         }
     }
+
+    $crons = _get_cron_array();
+    if (is_array($crons)) {
+        foreach ($crons as $timestamp => $cron_hooks) {
+            
+            // Check for delayed post translations
+            if (isset($cron_hooks['freedomtranslate_async_translate'])) {
+                foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
+                    $post_id = isset($event['args'][3]) ? $event['args'][3] : 'Unknown';
+                    $lang = isset($event['args'][2]) ? $event['args'][2] : 'Unknown';
+                    $group_key = 'group_' . $post_id . '_' . $lang;
+                    $safe_id = md5($group_key);
+
+                    if (!isset($unified[$safe_id])) {
+                        $unified[$safe_id] = ['s' => 'pending', 'p' => 0, 't' => 0];
+                    }
+                }
+            }
+            
+            // Check for static strings (they never exist in the DB, only in cron)
+            if (isset($cron_hooks['freedomtranslate_async_string_translate'])) {
+                foreach ($cron_hooks['freedomtranslate_async_string_translate'] as $sig => $event) {
+                    $string_id = isset($event['args'][0]) ? $event['args'][0] : 'Unknown';
+                    $target_lang = isset($event['args'][3]) ? $event['args'][3] : 'Unknown';
+                    $hash_key = 'string_job_' . $string_id . '_' . $target_lang . '_' . $sig;
+                    $safe_id = md5($hash_key);
+
+                    if (!isset($unified[$safe_id])) {
+                        $unified[$safe_id] = ['s' => 'pending', 'p' => 0, 't' => 0];
+                    }
+                }
+            }
+            
+        }
+    }
+
     wp_send_json($unified);
+});
+
+add_action('wp_ajax_ft_queue_start', function() {
+    check_ajax_referer('ft_queue_action', 'nonce');
+    $p_id = intval($_POST['post_id']);
+    $lang = sanitize_text_field($_POST['lang']);
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'freedomtranslate_cache';
+    $job = $wpdb->get_row($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status = 'pending' LIMIT 1", $p_id, $lang));
+    
+    if ($job) {
+        $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $job->hash_key]);
+        $site_lang = substr(get_locale(), 0, 2);
+        $args = [$job->hash_key, $site_lang, $lang, $p_id, uniqid('', true)];
+        wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
+    }
+    wp_send_json_success();
+});
+
+add_action('wp_ajax_ft_queue_cancel', function() {
+    check_ajax_referer('ft_queue_action', 'nonce');
+    
+    $p_id_raw = $_POST['post_id'];
+    $lang = sanitize_text_field($_POST['lang']);
+
+    $is_string = (strpos($p_id_raw, 'String: ') === 0);
+    $p_id = $is_string ? sanitize_text_field($p_id_raw) : intval($p_id_raw);
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'freedomtranslate_cache';
+
+    if ($is_string) {
+        $string_id = str_replace('String: ', '', $p_id);
+        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", 'string_job_' . $string_id . '_' . $lang . '%'));
+    } else {
+        $hashes = $wpdb->get_col($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status IN ('pending', 'processing')", $p_id, $lang));
+        if (!empty($hashes)) {
+            ft_cancel_remote_job($hashes);
+            foreach($hashes as $h) {
+                $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $h . '_chunk_%'));
+                $wpdb->delete($table, ['hash_key' => $h]);
+            }
+        }
+    }
+
+    $crons = _get_cron_array();
+    if (is_array($crons)) {
+        $changed = false;
+        foreach ($crons as $timestamp => $cron_hooks) {
+
+            if (isset($cron_hooks['freedomtranslate_async_translate'])) {
+                foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
+                    $event_lang = isset($event['args'][2]) ? $event['args'][2] : '';
+                    $event_post = isset($event['args'][3]) ? $event['args'][3] : '';
+                    
+                    if ($event_post == $p_id && $event_lang === $lang) {
+                        unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
+                        $changed = true;
+                    }
+                }
+                if (empty($crons[$timestamp]['freedomtranslate_async_translate'])) {
+                    unset($crons[$timestamp]['freedomtranslate_async_translate']);
+                }
+            }
+
+            if (isset($cron_hooks['freedomtranslate_async_string_translate'])) {
+                foreach ($cron_hooks['freedomtranslate_async_string_translate'] as $sig => $event) {
+                    $event_string_id = isset($event['args'][0]) ? 'String: ' . $event['args'][0] : '';
+                    $event_lang = isset($event['args'][3]) ? $event['args'][3] : '';
+                    
+                    if ($event_string_id === $p_id && $event_lang === $lang) {
+                        unset($crons[$timestamp]['freedomtranslate_async_string_translate'][$sig]);
+                        $changed = true;
+                    }
+                }
+
+                if (empty($crons[$timestamp]['freedomtranslate_async_string_translate'])) {
+                    unset($crons[$timestamp]['freedomtranslate_async_string_translate']);
+                }
+            }
+
+            if (empty($crons[$timestamp])) {
+                unset($crons[$timestamp]);
+            }
+        }
+        
+        if ($changed) {
+            update_option('cron', $crons);
+        }
+    }
+    
+    wp_send_json_success();
 });
