@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.9.5
+Version: 1.9.6
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -765,8 +765,9 @@ function freedomtranslate_filter_post_content($content, $id = null) {
 
     $user_lang = freedomtranslate_get_user_lang();
 
-    if ($user_lang === $site_source_lang) return $content;
-
+    if ($user_lang === $site_source_lang || !freedomtranslate_is_language_enabled($user_lang)) {
+        return $content;
+    }
 
     if (defined('REST_REQUEST') && REST_REQUEST) return $content;
     if (function_exists('wp_is_json_request') && wp_is_json_request()) return $content;
@@ -778,10 +779,6 @@ function freedomtranslate_filter_post_content($content, $id = null) {
     if (is_main_query() && is_home() && $current_obj_id === get_the_ID()) {
          return $content;
     }
-
-    $user_lang = freedomtranslate_get_user_lang();
-    $site_lang = substr(get_locale(), 0, 2);
-    if ($user_lang === $site_lang || !freedomtranslate_is_language_enabled($user_lang)) return $content;
 
     $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
     $filter_name = current_filter();
@@ -812,7 +809,7 @@ function freedomtranslate_filter_post_content($content, $id = null) {
                 
                 ft_update_progress($active_hash, $current_obj_id, $user_lang, 0, 'pending');
                 wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [
-                    $active_hash, $site_lang, $user_lang, $current_obj_id, uniqid('', true)
+                    $active_hash, $site_source_lang, $user_lang, $current_obj_id, uniqid('', true)
                 ]);
             }
         }
@@ -820,7 +817,7 @@ function freedomtranslate_filter_post_content($content, $id = null) {
         return $content;
     }
 
-    return freedomtranslate_translate($content, $site_lang, $user_lang, 'html', $current_obj_id, $active_hash);
+    return freedomtranslate_translate($content, $site_source_lang, $user_lang, 'html', $current_obj_id, $active_hash);
 }
 
 // HOOK
