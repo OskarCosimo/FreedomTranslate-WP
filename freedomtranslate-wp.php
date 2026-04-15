@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.9.6
+Version: 1.9.8
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -676,7 +676,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         }
         
         $chunk_hash = $hash_key . '_chunk_' . $done_chunks;
-        ft_set_cache($chunk_hash, $translated_chunk, $post_id, $user_lang, HOUR_IN_SECONDS, 'chunk_temp');
+        ft_set_cache($chunk_hash, $translated_chunk, $post_id, $user_lang, DAY_IN_SECONDS * 2, 'chunk_temp');
 
         $done_chunks++;
         ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'processing', $total_chunks);
@@ -776,16 +776,26 @@ function freedomtranslate_filter_post_content($content, $id = null) {
     $current_obj_id = ($id !== null && is_numeric($id)) ? (int)$id : (int)get_the_ID();
     if (!$current_obj_id) return $content;
 
-    if (is_main_query() && is_home() && $current_obj_id === get_the_ID()) {
-         return $content;
-    }
-
     $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
     $filter_name = current_filter();
 
     $active_hash = md5("post_{$current_obj_id}_{$filter_name}_{$user_lang}") . '_' . $filter_name;
 
     if (get_option(FREEDOMTRANSLATE_LIBRE_MODE_OPTION) === 'async' && $service === 'libretranslate') {
+        
+        // --- EXCERPT HIJACKING
+        if ($filter_name === 'the_excerpt') {
+            $content_hash = md5("post_{$current_obj_id}_the_content_{$user_lang}") . '_the_content';
+            $content_status = ft_get_status_db($content_hash);
+            
+            if ($content_status && $content_status->status === 'completed') {
+                $cached_content = ft_get_cache($content_hash);
+                if ($cached_content !== false) {
+                    return wp_trim_words(strip_tags(do_shortcode($cached_content)), 55);
+                }
+            }
+        }
+
         $status_data = ft_get_status_db($active_hash);
 
         if ($status_data && $status_data->status === 'completed') {
@@ -796,17 +806,13 @@ function freedomtranslate_filter_post_content($content, $id = null) {
         if (freedomtranslate_is_bot()) return $content;
 
         if (!$status_data) {
-            // --- STRICT MANUAL MODE CHECK ---
             if (get_option(FREEDOMTRANSLATE_STRICT_MANUAL_OPTION, '1') === '1') {
                 return $content; 
             }
-            // --------------------------------
             
-            // ANTI-DDOS LOCK
             $lock_key = 'ft_lock_' . md5($active_hash);
             if (false === get_transient($lock_key)) {
                 set_transient($lock_key, true, 60);
-                
                 ft_update_progress($active_hash, $current_obj_id, $user_lang, 0, 'pending');
                 wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [
                     $active_hash, $site_source_lang, $user_lang, $current_obj_id, uniqid('', true)
