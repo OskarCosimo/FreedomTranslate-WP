@@ -2077,15 +2077,14 @@ function freedomtranslate_settings_page() {
                     var checkboxes = form.querySelectorAll('input[name="direct_langs[]"]:checked');
                     var selectedLangs = Array.from(checkboxes).map(cb => cb.value);
 
+                    // If no languages selected, append the trigger and let PHP handle the error validation
                     if (selectedLangs.length === 0) {
-                        form.submit(); // Let PHP handle the error validation
+                        triggerRealSubmit(form);
                         return;
                     }
 
                     var formData = new FormData();
                     formData.append('action', 'ft_check_existing_translations');
-                    // We reuse the existing queue action nonce from the environment if available, 
-                    // or generate a new one via inline PHP
                     formData.append('nonce', '<?php echo wp_create_nonce("ft_queue_action"); ?>');
                     formData.append('post_id', postInput);
                     selectedLangs.forEach(lang => formData.append('langs[]', lang));
@@ -2101,17 +2100,27 @@ function freedomtranslate_settings_page() {
                         
                         if (data.exists) {
                             if (confirm('Are you sure you want to overwrite this post for the selected languages? The existing cache for the selected languages ​​will be destroyed and retranslated from scratch.')) {
-                                form.submit();
+                                triggerRealSubmit(form);
                             }
                         } else {
-                            form.submit();
+                            triggerRealSubmit(form);
                         }
                     })
                     .catch(err => {
                         // Fallback on network error
-                        form.submit();
+                        triggerRealSubmit(form);
                     });
                 });
+
+                // Helper function to inject the submit button's name into the payload
+                function triggerRealSubmit(targetForm) {
+                    var hiddenTrigger = document.createElement('input');
+                    hiddenTrigger.type = 'hidden';
+                    hiddenTrigger.name = 'freedomtranslate_direct_push';
+                    hiddenTrigger.value = '1';
+                    targetForm.appendChild(hiddenTrigger);
+                    targetForm.submit();
+                }
             });
             </script>
 
