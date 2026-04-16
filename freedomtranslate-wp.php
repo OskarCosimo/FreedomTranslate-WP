@@ -385,10 +385,12 @@ function freedomtranslate_translate_google_official($text, $source, $target, $fo
         'headers' => ['Content-Type'=>'application/json'],
         'timeout' => $timeout,
     ]);
-    if (is_wp_error($response)) return $text;
+    
+    // RETURN REAL ERROR INSTEAD OF SILENT FALLBACK
+    if (is_wp_error($response)) return $response; 
+    
     $json = json_decode(wp_remote_retrieve_body($response), true);
-    return isset($json['data']['translations']['translatedText'])
-        ? $json['data']['translations']['translatedText'] : $text;
+    return isset($json['data']['translations']['translatedText']) ? $json['data']['translations']['translatedText'] : new WP_Error('api_error', 'Missing translatedText');
 }
 
 function freedomtranslate_translate_libre( $text, $source, $target, $format = 'text', $job_id = '' ) {
@@ -399,17 +401,19 @@ function freedomtranslate_translate_libre( $text, $source, $target, $format = 't
 
     $body = ['q'=>$text,'source'=>$source,'target'=>$target,'format'=>$format];
     if (!empty( $job_id)) {
-    $body['job_id'] = $job_id;
+        $body['job_id'] = $job_id;
     }
     if (!empty($api_key)) {
-    $body['api_key'] = $api_key;
+        $body['api_key'] = $api_key;
     }
     
     $response = wp_remote_post($api_url, ['body'=>$body,'timeout'=>$timeout]);
-    if (is_wp_error($response)) return $text;
+    
+    // RETURN REAL ERROR INSTEAD OF SILENT FALLBACK
+    if (is_wp_error($response)) return $response;
     
     $json = json_decode(wp_remote_retrieve_body($response), true);
-    return isset($json['translatedText']) ? $json['translatedText'] : $text;
+    return isset($json['translatedText']) ? $json['translatedText'] : new WP_Error('api_error', 'Missing translatedText');
 }
 
 function freedomtranslate_protect_excluded_words_in_html($html, $excluded_words) {
@@ -509,6 +513,8 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text', $
             break;
     }
 
+    if (is_wp_error($translated)) return $text;
+
     if (!empty($placeholders)) {
         $translated = freedomtranslate_restore_excluded_words_in_html($translated, $placeholders);
     }
@@ -536,6 +542,12 @@ function freedomtranslate_string_worker($string_id, $text, $site_lang, $target_l
     } else {
         $translated = freedomtranslate_translate_libre($text, $site_lang, $target_lang, 'text');
     }
+
+    if (is_wp_error($translated_chunk)) {
+            // Write 'timeout' status to DB and abort worker immediately
+            ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'timeout', $total_chunks);
+            return; 
+        }
 
     if ($translated !== $text && !empty(trim($translated))) {
         
@@ -656,6 +668,12 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
             $translated_chunk = freedomtranslate_translate_google_official($chunks[$done_chunks], $site_lang, $user_lang, 'html');
         } else {
             $translated_chunk = freedomtranslate_translate_libre($chunks[ $done_chunks ], $site_lang, $user_lang, 'html', $hash_key);
+        }
+
+        if (is_wp_error($translated_chunk)) {
+            // Write 'timeout' status to DB and abort worker immediately
+            ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'timeout', $total_chunks);
+            return; 
         }
         
         $chunk_hash = $hash_key . '_chunk_' . $done_chunks;
@@ -993,10 +1011,9 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                 $status_label = strtoupper($item['status']);
                 if ($item['status'] === 'cron_only') $status_label = 'ZOMBIE CRON';
                 
-                // QUI CI SONO GLI ID MANGIATI DAL JAVASCRIPT!
                 $html = '<div style="margin-bottom: 5px;" id="ft_status_wrap_' . $safe_id . '"><span id="ft_status_badge_' . $safe_id . '" style="background: ' . $bg_color . '; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">' . esc_html($status_label) . '</span></div>';
                 
-                if (in_array($item['status'], ['pending', 'processing'])) {
+                if (in_array($item['status'], ['pending', 'processing', 'timeout'])) {
                     $percent = 0;
                     $visual_width = 5;
                     $label = 'Chunk: ' . $item['progress'] . ' / ? (Waiting...)';
@@ -1022,8 +1039,9 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                 $nonce_val = wp_create_nonce('ft_queue_action');
                 $html = '<div style="display: flex; gap: 8px; align-items: center;">';
                 
-                if ($item['status'] === 'pending') {
-                    $html .= '<button class="button button-small button-primary ft-ajax-start" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">Start Now</button>';
+                if (in_array($item['status'], ['pending', 'timeout'])) {
+                    $btn_text = ($item['status'] === 'timeout') ? 'Restart Job' : 'Start Now';
+                    $html .= '<button class="button button-small button-primary ft-ajax-start" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">' . $btn_text . '</button>';
                 }
 
                 $html .= '<button class="button button-small ft-ajax-cancel" style="color: #d63638; border-color: #d63638;" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">Cancel</button>';
@@ -1044,7 +1062,7 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
         global $wpdb;
         $table = $wpdb->prefix . 'freedomtranslate_cache';
         
-        $db_jobs = $wpdb->get_results("SELECT * FROM $table WHERE status IN ('pending', 'processing')");
+        $db_jobs = $wpdb->get_results("SELECT * FROM $table WHERE status IN ('pending', 'processing', 'timeout')");
         $unified_data = [];
 
         foreach ($db_jobs as $job) {
@@ -1290,6 +1308,9 @@ function freedomtranslate_settings_page() {
 
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
+
+    // Check if the queue is active (pending, processing, or timeout)
+    $active_jobs_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table WHERE status IN ('pending', 'processing', 'timeout')");
 
     // --- FORM HANDLERS ---
     // --- HANDLER: DIRECT TRANSLATE PUSH ---
@@ -1537,7 +1558,18 @@ function freedomtranslate_settings_page() {
 
     elseif (isset($_POST['freedomtranslate_save_general'])) {
         check_admin_referer('freedomtranslate_save_general', 'freedomtranslate_nonce_general');
-        update_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, sanitize_text_field(wp_unslash($_POST['translation_service'])));
+        
+        // Prevent engine swap if queue is not empty
+        $new_service = sanitize_text_field(wp_unslash($_POST['translation_service']));
+        $old_service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
+
+        if (isset($active_jobs_count) && $active_jobs_count > 0 && $new_service !== $old_service) {
+            echo '<div class="notice notice-error"><p><strong>Error:</strong> You cannot change the translation service while there are active jobs in the queue. Please clear or complete the queue first.</p></div>';
+            // Force the old service to stay in the variable for the rest of the saving logic
+            $new_service = $old_service;
+        }
+
+        update_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, $new_service);
         
         $mode = sanitize_text_field(wp_unslash($_POST['lang_detection_mode']));
         update_option(FREEDOMTRANSLATE_LANG_DETECTION_MODE_OPTION, $mode);
@@ -1769,9 +1801,19 @@ function freedomtranslate_settings_page() {
                     <tr>
                         <th scope="row">Select Engine</th>
                         <td>
-                            <label><input type="radio" name="translation_service" value="libretranslate" onchange="ftToggleServiceUI()" <?php checked($current_service,'libretranslate'); ?>> AI / LibreTranslate (Local/Remote)</label><br>
-                            <label><input type="radio" name="translation_service" value="google_official" onchange="ftToggleServiceUI()" <?php checked($current_service,'google_official'); ?>> Google Cloud API (Official - Paid)</label><br>
-                            <label><input type="radio" name="translation_service" value="googlehash" onchange="ftToggleServiceUI()" <?php checked($current_service,'googlehash'); ?>> Google Translate (free hash-based)</label>
+                            <?php if ($active_jobs_count > 0) : ?>
+                                <p style="color: #d63638; font-weight: bold; margin-bottom: 10px;">
+                                    ⚠️ Engine selection is locked. Clear the <a href="?page=freedomtranslate&tab=queue_monitor">Queue Monitor</a> to change the service.
+                                </p>
+                            <?php endif; ?>
+
+                            <label><input type="radio" name="translation_service" value="libretranslate" onchange="ftToggleServiceUI()" <?php checked($current_service,'libretranslate'); ?> <?php disabled($active_jobs_count > 0); ?>> AI / LibreTranslate (Local/Remote)</label><br>
+                            <label><input type="radio" name="translation_service" value="google_official" onchange="ftToggleServiceUI()" <?php checked($current_service,'google_official'); ?> <?php disabled($active_jobs_count > 0); ?>> Google Cloud API (Official - Paid)</label><br>
+                            <label><input type="radio" name="translation_service" value="googlehash" onchange="ftToggleServiceUI()" <?php checked($current_service,'googlehash'); ?> <?php disabled($active_jobs_count > 0); ?>> Google Translate (free hash-based)</label>
+                            
+                            <?php if ($active_jobs_count > 0) : ?>
+                                <input type="hidden" name="translation_service" value="<?php echo esc_attr($current_service); ?>">
+                            <?php endif; ?>
                         </td>
                     </tr>
                 </table>
@@ -2270,7 +2312,10 @@ document.addEventListener("DOMContentLoaded", function() {
                         var badge = document.getElementById('ft_status_badge_' + safe_id);
                         if (badge) {
                             badge.textContent = job.s.toUpperCase();
-                            badge.style.background = (job.s === 'pending') ? '#f0b849' : ((job.s === 'processing') ? '#2271b1' : '#72777c');
+                            if (job.s === 'pending') badge.style.background = '#f0b849';
+                            else if (job.s === 'processing') badge.style.background = '#2271b1';
+                            else if (job.s === 'timeout') badge.style.background = '#d63638'; // Red badge
+                            else badge.style.background = '#72777c';
                         }
                         
                         // Update progress bar
@@ -2281,25 +2326,33 @@ document.addEventListener("DOMContentLoaded", function() {
                             var visual_width = 5;
                             var label = 'Chunk: ' + job.p + ' / ? (Waiting...)';
                             
-                            // Apply visual changes for slow jobs
-                            if (isSlow) {
-                                barFill.style.background = '#f39c12'; // Orange/Yellow
+                            // HARD TIMEOUT DETECTED
+                            if (job.s === 'timeout') {
+                                barFill.style.background = '#d63638';
+                                barFill.style.width = '100%';
+                                barText.textContent = 'API TIMEOUT ❌ (Needs Restart)';
+                                barText.style.color = '#fff';
                             } else {
-                                barFill.style.background = '#27ae60'; // Standard Green
+                                // Apply visual changes for slow jobs (Snail mode)
+                                if (isSlow) {
+                                    barFill.style.background = '#f39c12'; // Orange/Yellow
+                                } else {
+                                    barFill.style.background = '#27ae60'; // Standard Green
+                                }
+                                
+                                if (job.t > 0) {
+                                    var percent = Math.round((job.p / job.t) * 100);
+                                    visual_width = Math.max(5, percent);
+                                    label = 'Chunk: ' + job.p + ' / ' + job.t + ' (' + percent + '%)';
+                                    if (isSlow) label += ' 🐌 (Slow AI)';
+                                } else if (isSlow) {
+                                    label += ' 🐌 (Slow AI)';
+                                }
+                                
+                                barFill.style.width = visual_width + '%';
+                                barText.textContent = label;
+                                barText.style.color = (visual_width > 50 || isSlow) ? '#fff' : '#000';
                             }
-                            
-                            if (job.t > 0) {
-                                var percent = Math.round((job.p / job.t) * 100);
-                                visual_width = Math.max(5, percent);
-                                label = 'Chunk: ' + job.p + ' / ' + job.t + ' (' + percent + '%)';
-                                if (isSlow) label += ' 🐌 (Slow AI)';
-                            } else if (isSlow) {
-                                label += ' 🐌 (Slow AI)';
-                            }
-                            
-                            barFill.style.width = visual_width + '%';
-                            barText.textContent = label;
-                            barText.style.color = (visual_width > 50 || isSlow) ? '#fff' : '#000';
                         }
                     });
                 } catch(e) {}
@@ -2542,7 +2595,7 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
     $table = $wpdb->prefix . 'freedomtranslate_cache';
     
     // Fetch active jobs from the custom database table
-    $db_jobs = $wpdb->get_results("SELECT hash_key, post_id, target_lang, status, progress, total_chunks FROM $table WHERE status IN ('pending', 'processing')");
+    $db_jobs = $wpdb->get_results("SELECT hash_key, post_id, target_lang, status, progress, total_chunks FROM $table WHERE status IN ('pending', 'processing', 'timeout')");
     $unified = [];
     
     foreach ($db_jobs as $job) {
@@ -2608,7 +2661,7 @@ add_action('wp_ajax_ft_queue_start', function() {
 
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
-    $job = $wpdb->get_row($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status = 'pending' LIMIT 1", $p_id, $lang));
+    $job = $wpdb->get_row($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status IN ('pending', 'timeout') LIMIT 1", $p_id, $lang));
     
     if ($job) {
         $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $job->hash_key]);
