@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 1.9.8
+Version: 1.9.9
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -322,23 +322,6 @@ function freedomtranslate_language_selector_shortcode($atts) {
         window.addEventListener("DOMContentLoaded",function(){var l=document.getElementById("freedomtranslate-loader");if(l)l.style.display="flex";});
     }
     </script>';
-
-    if ($post_id > 0) {
-        $content_hash = md5("post_{$post_id}_the_content_{$current}") . '_the_content';
-        $status_data = ft_get_status_db($content_hash);
-        
-        if ($status_data && $status_data->status !== 'completed') {
-            $ck = esc_attr($content_hash);
-            $html .= '<div class="ft-progress-banner ft-pb-visible" data-cache-key="' . $ck . '">'
-                   . '<div class="ft-pb-spinner"></div>'
-                   . '<span class="ft-pb-text">Translation in progress...</span>'
-                   . '</div>';
-
-            add_action('wp_footer', function() use ($content_hash) {
-                freedomtranslate_async_banner_script($content_hash);
-            });
-        }
-    }
 
     return $html;
 }
@@ -852,87 +835,6 @@ function freedomtranslate_auto_inject_selector($content) {
 }
 add_filter('the_content', 'freedomtranslate_auto_inject_selector', 9);
 
-function freedomtranslate_async_banner_script($hash_key) {
-    $ajax_url = admin_url('admin-ajax.php');
-    ?>
-    <script>
-    (function() {
-        var cacheKey    = <?php echo json_encode($hash_key); ?>;
-        var ajaxUrl     = <?php echo json_encode($ajax_url); ?>;
-        var sessionFlag = 'ft_reloaded_' + cacheKey;
-
-        function getBanners() {
-            var all = document.querySelectorAll('.ft-progress-banner[data-cache-key]');
-            var res = [];
-            for (var i = 0; i < all.length; i++) {
-                if (all[i].getAttribute('data-cache-key') === cacheKey) res.push(all[i]);
-            }
-            return res;
-        }
-
-        if (sessionStorage.getItem(sessionFlag)) {
-            var bs = getBanners();
-            for (var i = 0; i < bs.length; i++) bs[i].classList.remove('ft-pb-visible');
-            return;
-        }
-
-        var interval    = null;
-        var attempts    = 0;
-        var maxAttempts = 360;
-
-        function checkReady() {
-            attempts++;
-            if (attempts > maxAttempts) {
-                clearInterval(interval);
-                var bns = getBanners();
-                for (var i = 0; i < bns.length; i++) bns[i].classList.remove('ft-pb-visible');
-                return;
-            }
-
-            var xhr = new XMLHttpRequest();
-            xhr.open('GET', ajaxUrl + '?action=freedomtranslate_check_ready&cache_key=' + encodeURIComponent(cacheKey), true);
-            xhr.onreadystatechange = function() {
-                if (xhr.readyState === 4 && xhr.status === 200) {
-                    try {
-                        var data = JSON.parse(xhr.responseText);
-                        if (data.ready) {
-                            clearInterval(interval);
-                            var bns = getBanners();
-                            for (var bi = 0; bi < bns.length; bi++) {
-                                bns[bi].classList.add('ft-pb-ready');
-                                var sp = bns[bi].querySelector('.ft-pb-spinner');
-                                var tx = bns[bi].querySelector('.ft-pb-text');
-                                if (sp) sp.style.display = 'none';
-                                if (tx) tx.textContent = 'Translation ready! Reloading...';
-                                bns[bi].style.cursor = 'pointer';
-                                bns[bi].addEventListener('click', function() {
-                                    sessionStorage.setItem(sessionFlag, '1');
-                                    window.location.reload();
-                                });
-                            }
-                            setTimeout(function() {
-                                sessionStorage.setItem(sessionFlag, '1');
-                                window.location.reload();
-                            }, 2000);
-                        } else if (typeof data.progress !== 'undefined' && data.progress >= 0) {
-                            var bns = getBanners();
-                            for (var bi = 0; bi < bns.length; bi++) {
-                                var tx = bns[bi].querySelector('.ft-pb-text');
-                                if (tx) tx.textContent = 'Translation in progress... ' + data.progress + '%';
-                            }
-                        }
-                    } catch(e) {}
-                }
-            };
-            xhr.send();
-        }
-
-        interval = setInterval(checkReady, 5000);
-    })();
-    </script>
-    <?php
-}
-
 // ========================================================================
 // 6. ADMIN PANEL
 // ========================================================================
@@ -1422,27 +1324,34 @@ function freedomtranslate_settings_page() {
                 foreach ($selected_langs as $lang) {
                     if ($lang === $site_lang) continue;
 
+                    // Delete existing completed caches to force a fresh translation
+                    $t_hash = md5("post_{$post_id}_the_title_{$lang}") . '_the_title';
+                    $wpdb->delete($table, ['hash_key' => $t_hash]);
+                    $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $t_hash . '_chunk_%')); 
+                    
                     if (!empty($post->post_title)) {
-                        $t_hash = md5("post_{$post_id}_the_title_{$lang}") . '_the_title';
-                        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $t_hash . '_chunk_%')); 
                         ft_update_progress($t_hash, $post_id, $lang, 0, 'pending');
                         wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
                         $delay += 2; 
                         $queued_count++;
                     }
 
+                    $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
+                    $wpdb->delete($table, ['hash_key' => $c_hash]);
+                    $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $c_hash . '_chunk_%')); 
+                    
                     if (!empty($post->post_content)) {
-                        $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
-                        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $c_hash . '_chunk_%')); 
                         ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
                         wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
                         $delay += 3;
                         $queued_count++;
                     }
                     
+                    $e_hash = md5("post_{$post_id}_the_excerpt_{$lang}") . '_the_excerpt';
+                    $wpdb->delete($table, ['hash_key' => $e_hash]);
+                    $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $e_hash . '_chunk_%'));
+                    
                     if (!empty($post->post_excerpt)) {
-                        $e_hash = md5("post_{$post_id}_the_excerpt_{$lang}") . '_the_excerpt';
-                        $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $e_hash . '_chunk_%'));
                         ft_update_progress($e_hash, $post_id, $lang, 0, 'pending');
                         wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$e_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
                         $delay += 2;
@@ -1717,7 +1626,7 @@ function freedomtranslate_settings_page() {
         echo '<div class="notice notice-success"><p>Entire translation database cache cleared successfully.</p></div>';
     }
 
-if (isset($_POST['freedomtranslate_purge_cron'])) {
+    if (isset($_POST['freedomtranslate_purge_cron'])) {
     check_admin_referer('freedomtranslate_purge_cron', 'freedomtranslate_nonce_cron');
 
     $active_hashes = $wpdb->get_col(
@@ -2110,7 +2019,7 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
             <p class="description">Save your local AI server resources! Instead of waiting for users to visit pages, paste a post URL here and push it to the background translation queue manually.</p>
             
             <div style="background:#f9f9f9; padding:20px; border:1px solid #ccc; margin-top: 15px; border-radius: 5px;">
-                <form method="post">
+                <form method="post" id="ft_direct_push_form">
                     <?php wp_nonce_field('freedomtranslate_direct_push', 'freedomtranslate_nonce_direct'); ?>
                     
                     <table class="form-table">
@@ -2151,6 +2060,60 @@ if (isset($_POST['freedomtranslate_purge_cron'])) {
                     </p>
                 </form>
             </div>
+            <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                var form = document.getElementById('ft_direct_push_form');
+                if (!form) return;
+
+                form.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    
+                    var submitBtn = form.querySelector('input[type="submit"]');
+                    var originalBtnText = submitBtn.value;
+                    submitBtn.value = 'Checking database...';
+                    submitBtn.disabled = true;
+
+                    var postInput = form.querySelector('input[name="direct_post_input"]').value;
+                    var checkboxes = form.querySelectorAll('input[name="direct_langs[]"]:checked');
+                    var selectedLangs = Array.from(checkboxes).map(cb => cb.value);
+
+                    if (selectedLangs.length === 0) {
+                        form.submit(); // Let PHP handle the error validation
+                        return;
+                    }
+
+                    var formData = new FormData();
+                    formData.append('action', 'ft_check_existing_translations');
+                    // We reuse the existing queue action nonce from the environment if available, 
+                    // or generate a new one via inline PHP
+                    formData.append('nonce', '<?php echo wp_create_nonce("ft_queue_action"); ?>');
+                    formData.append('post_id', postInput);
+                    selectedLangs.forEach(lang => formData.append('langs[]', lang));
+
+                    fetch('<?php echo admin_url("admin-ajax.php"); ?>', {
+                        method: 'POST',
+                        body: formData
+                    })
+                    .then(res => res.json())
+                    .then(data => {
+                        submitBtn.value = originalBtnText;
+                        submitBtn.disabled = false;
+                        
+                        if (data.exists) {
+                            if (confirm('Are you sure you want to overwrite this post for the selected languages? The existing cache for the selected languages ​​will be destroyed and retranslated from scratch.')) {
+                                form.submit();
+                            }
+                        } else {
+                            form.submit();
+                        }
+                    })
+                    .catch(err => {
+                        // Fallback on network error
+                        form.submit();
+                    });
+                });
+            });
+            </script>
 
         <?php elseif ($active_tab === 'queue_monitor'): ?>
             
@@ -2253,11 +2216,16 @@ document.addEventListener("DOMContentLoaded", function() {
                         });
                     }
 
+                    // Global tracker to detect slow chunks (soft freeze)
+                    window.ftProgressTracker = window.ftProgressTracker || {};
+                    var nowTime = Date.now();
+
                     var wrappers = document.querySelectorAll('div[id^="ft_status_wrap_"]');
                     wrappers.forEach(function(wrap) {
                         var safe_id = wrap.id.replace('ft_status_wrap_', '');
 
                         if (!data[safe_id]) {
+                            // Smooth fade out if job is completed/removed
                             var row = wrap.closest('tr');
                             if (row && row.style.opacity !== '0.2') {
                                 row.style.transition = 'opacity 0.6s ease';
@@ -2268,26 +2236,61 @@ document.addEventListener("DOMContentLoaded", function() {
                         }
                         
                         var job = data[safe_id];
+                        
+                        // --- SOFT FREEZE DETECTION (SNAIL MODE) ---
+                        var isSlow = false;
+                        if (job.s === 'processing') {
+                            if (!window.ftProgressTracker[safe_id]) {
+                                window.ftProgressTracker[safe_id] = { p: job.p, time: nowTime };
+                            } else {
+                                if (window.ftProgressTracker[safe_id].p !== job.p) {
+                                    // Chunk progressed, reset timer
+                                    window.ftProgressTracker[safe_id].p = job.p;
+                                    window.ftProgressTracker[safe_id].time = nowTime;
+                                } else if ((nowTime - window.ftProgressTracker[safe_id].time) > 120000) {
+                                    // 2 minutes without progress = slow AI processing
+                                    isSlow = true;
+                                }
+                            }
+                        } else {
+                            // Clear tracker if the job is no longer processing
+                            if (window.ftProgressTracker[safe_id]) delete window.ftProgressTracker[safe_id];
+                        }
+
+                        // Update status badge
                         var badge = document.getElementById('ft_status_badge_' + safe_id);
                         if (badge) {
                             badge.textContent = job.s.toUpperCase();
                             badge.style.background = (job.s === 'pending') ? '#f0b849' : ((job.s === 'processing') ? '#2271b1' : '#72777c');
                         }
                         
+                        // Update progress bar
                         var barFill = document.getElementById('ft_bar_fill_' + safe_id);
                         var barText = document.getElementById('ft_bar_text_' + safe_id);
                         
                         if (barFill && barText) {
                             var visual_width = 5;
                             var label = 'Chunk: ' + job.p + ' / ? (Waiting...)';
+                            
+                            // Apply visual changes for slow jobs
+                            if (isSlow) {
+                                barFill.style.background = '#f39c12'; // Orange/Yellow
+                            } else {
+                                barFill.style.background = '#27ae60'; // Standard Green
+                            }
+                            
                             if (job.t > 0) {
                                 var percent = Math.round((job.p / job.t) * 100);
                                 visual_width = Math.max(5, percent);
                                 label = 'Chunk: ' + job.p + ' / ' + job.t + ' (' + percent + '%)';
+                                if (isSlow) label += ' 🐌 (Slow AI)';
+                            } else if (isSlow) {
+                                label += ' 🐌 (Slow AI)';
                             }
+                            
                             barFill.style.width = visual_width + '%';
                             barText.textContent = label;
-                            barText.style.color = (visual_width > 50) ? '#fff' : '#000';
+                            barText.style.color = (visual_width > 50 || isSlow) ? '#fff' : '#000';
                         }
                     });
                 } catch(e) {}
@@ -2680,4 +2683,40 @@ add_action('wp_ajax_ft_queue_cancel', function() {
     }
     
     wp_send_json_success();
+});
+
+// Check if a post is already translated in the selected languages
+add_action('wp_ajax_ft_check_existing_translations', function() {
+    check_ajax_referer('ft_queue_action', 'nonce');
+    
+    $post_id_raw = $_POST['post_id'] ?? '';
+    $langs = isset($_POST['langs']) ? array_map('sanitize_text_field', (array)$_POST['langs']) : [];
+
+    // Parse URL to Post ID if needed
+    $post_id = 0;
+    if (is_numeric($post_id_raw)) {
+        $post_id = intval($post_id_raw);
+    } else {
+        $post_id = url_to_postid($post_id_raw);
+        if ($post_id === 0 && function_exists('attachment_url_to_postid')) {
+            $post_id = attachment_url_to_postid($post_id_raw);
+        }
+    }
+
+    $existing = false;
+    if ($post_id > 0 && !empty($langs)) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'freedomtranslate_cache';
+
+        foreach ($langs as $lang) {
+            $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
+            $row = $wpdb->get_row($wpdb->prepare("SELECT status FROM $table WHERE hash_key = %s AND status = 'completed'", $c_hash));
+            if ($row) {
+                $existing = true;
+                break;
+            }
+        }
+    }
+
+    wp_send_json(['exists' => $existing]);
 });
