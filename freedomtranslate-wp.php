@@ -596,6 +596,7 @@ function freedomtranslate_string_worker($string_id, $text, $site_lang, $target_l
 }
 
 function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_id) {
+    // Check if the panic button was pressed
     if (get_transient('ft_kill_switch')) return;
 
     set_time_limit(0);
@@ -609,19 +610,41 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     $is_processing = ($current_status && $current_status->status === 'processing');
 
     if (!$is_processing) {
+        // Prevent Race Conditions when multiple crons fire at the exact same millisecond
+        $lock_name = 'ft_lock_worker_startup';
+        $locked = false;
+        $attempts = 0;
+        
+        while ($attempts < 30) {
+            if (false === get_transient($lock_name)) {
+                set_transient($lock_name, '1', 5);
+                $locked = true;
+                break;
+            }
+            usleep(50000); 
+            $attempts++;
+        }
+
         global $wpdb;
         $table = $wpdb->prefix . 'freedomtranslate_cache';
         
+        // Count currently active translation jobs
         $active_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table WHERE status = 'processing'");
         
         if ($active_count >= $max_concurrent) {
-            wp_schedule_single_event(time() + rand(300, 600), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, uniqid('', true)]);
+            if ($locked) delete_transient($lock_name);
+            // Reschedule with a random delay if queue is full to avoid infinite stacking
+            wp_schedule_single_event(time() + rand(30, 90), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, uniqid('', true)]);
             return;
         }
 
-        ft_update_progress($hash_key, $post_id, $user_lang, 0, 'processing', $total_chunks);
+        // Lock acquired and under limit: claim this job
+        ft_update_progress($hash_key, $post_id, $user_lang, 0, 'processing', 0);
+        
+        if ($locked) delete_transient($lock_name);
     }
 
+    // Determine what content needs to be translated based on hash and post type
     if ($post->post_type === 'nav_menu_item') {
         $source_text = $post->post_title;
 
@@ -654,14 +677,15 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     $done_chunks = ($current_status && $current_status->status === 'processing') ? (int) $current_status->progress : 0;
 
     $start_time = time();
-    // Sync the loop with the api timeout, plus 10 second of margin
+    // Sync the loop with the api timeout, plus 10 seconds of margin
     $api_timeout = (int) get_option('freedomtranslate_api_timeout', 120);
     $max_execution_time = $api_timeout + 10;
 
     while ($done_chunks < $total_chunks) {
+        // Double check kill switch during heavy loops
         if (get_transient('ft_kill_switch')) return; 
 
-        // check engine
+        // Check selected translation engine
         $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
         
         if ($service === 'google_official') {
@@ -670,34 +694,41 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
             $translated_chunk = freedomtranslate_translate_libre($chunks[ $done_chunks ], $site_lang, $user_lang, 'html', $hash_key);
         }
 
+        // Catch timeout or connection errors gracefully
         if (is_wp_error($translated_chunk)) {
             // Write 'timeout' status to DB and abort worker immediately
             ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'timeout', $total_chunks);
             return; 
         }
         
+        // Save the translated chunk temporarily
         $chunk_hash = $hash_key . '_chunk_' . $done_chunks;
         ft_set_cache($chunk_hash, $translated_chunk, $post_id, $user_lang, DAY_IN_SECONDS * 2, 'chunk_temp');
 
         $done_chunks++;
         ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'processing', $total_chunks);
 
+        // Break loop and reschedule if execution time limit is reached
         if ($done_chunks < $total_chunks && (time() - $start_time) >= $max_execution_time) {
             wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, uniqid('', true)]);
             return; 
         }
     }
 
+    // Assemble the final content from cached chunks
     $final_content = '';
     for ($i = 0; $i < $total_chunks; $i++) {
         $chunk_part = ft_get_cache($hash_key . '_chunk_' . $i);
         $final_content .= ($chunk_part !== false) ? $chunk_part : '';
     }
 
+    // Restore shortcodes before saving
     $final_content = freedomtranslate_restore_shortcodes($final_content, $sc_placeholders);
 
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
+    
+    // Save the fully translated content into the main database record
     $wpdb->replace($table, [
         'hash_key'    => $hash_key,
         'post_id'     => $post_id,
@@ -708,16 +739,17 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         'expires_at'  => gmdate('Y-m-d H:i:s', time() + (DAY_IN_SECONDS * freedomtranslate_get_ttl_days($post_id)))
     ]);
 
+    // Cleanup temporary chunks
     $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $hash_key . '_chunk_%'));
     delete_option('ft_job_' . $hash_key);
 
+    // Look for the next pending job in the queue and start it
     $next_job = $wpdb->get_row("SELECT hash_key, target_lang, post_id FROM $table WHERE status = 'pending' LIMIT 1");
     if ($next_job) {
-wp_schedule_single_event(time() + 2, 'freedomtranslate_async_translate', [
-$next_job->hash_key, $site_lang, $next_job->target_lang, $next_job->post_id, uniqid('', true)
-]);
+        wp_schedule_single_event(time() + 2, 'freedomtranslate_async_translate', [
+            $next_job->hash_key, $site_lang, $next_job->target_lang, $next_job->post_id, uniqid('', true)
+        ]);
     }
-
 }
 
 function freedomtranslate_split_html_into_chunks($html, $max_chars = 500) {
@@ -1294,7 +1326,7 @@ add_action('admin_init', function() {
                 if ($lang === $site_lang) continue;
 
                 wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, uniqid('', true)]);
-                $delay += 2;
+                $delay += 15;
             }
 
             wp_redirect(admin_url('options-general.php?page=freedomtranslate&tab=static_strings&ft_msg=string_saved'));
@@ -1353,7 +1385,7 @@ function freedomtranslate_settings_page() {
                     if (!empty($post->post_title)) {
                         ft_update_progress($t_hash, $post_id, $lang, 0, 'pending');
                         wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
-                        $delay += 2; 
+                        $delay += 5; 
                         $queued_count++;
                     }
 
@@ -1364,7 +1396,7 @@ function freedomtranslate_settings_page() {
                     if (!empty($post->post_content)) {
                         ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
                         wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
-                        $delay += 3;
+                        $delay += 45;
                         $queued_count++;
                     }
                     
@@ -1375,7 +1407,7 @@ function freedomtranslate_settings_page() {
                     if (!empty($post->post_excerpt)) {
                         ft_update_progress($e_hash, $post_id, $lang, 0, 'pending');
                         wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$e_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
-                        $delay += 2;
+                        $delay += 15;
                         $queued_count++;
                     }
                 }
@@ -1528,7 +1560,7 @@ function freedomtranslate_settings_page() {
                     [$id, $text, $site_lang, $lang, uniqid('', true)]
                 );
                 
-                $delay += 2; // Increment delay by 2 seconds for each language
+                $delay += 15; // Increment delay by 15 seconds for each language
             }
             }
             echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'retranslated', $clean_url)) . '";</script>';
@@ -2223,7 +2255,7 @@ document.addEventListener("DOMContentLoaded", function() {
             fetch(ajaxUrl, { method: 'POST', body: formData })
             .then(res => res.json())
             .then(data => {
-                if (action === 'ft_queue_start' && data.success) btn.remove();
+                if (action === 'ft_queue_start' && data.success) btn.style.display = 'none';
             });
         }
     });
@@ -2316,6 +2348,21 @@ document.addEventListener("DOMContentLoaded", function() {
                             else if (job.s === 'processing') badge.style.background = '#2271b1';
                             else if (job.s === 'timeout') badge.style.background = '#d63638'; // Red badge
                             else badge.style.background = '#72777c';
+                        }
+
+                        //start button
+                        var rowNode = wrap.closest('tr');
+                        if (rowNode) {
+                            var actionBtn = rowNode.querySelector('.ft-ajax-start');
+                            if (actionBtn) {
+                                if (job.s === 'processing') {
+                                    actionBtn.style.display = 'none';
+                                } else if (job.s === 'timeout' || job.s === 'pending') {
+                                    actionBtn.style.display = 'inline-block';
+                                    actionBtn.textContent = (job.s === 'timeout') ? 'Restart Job' : 'Start Now';
+                                    actionBtn.disabled = false;
+                                }
+                            }
                         }
                         
                         // Update progress bar
