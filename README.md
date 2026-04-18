@@ -167,7 +167,8 @@ For the ultimate private translation server:
 
 ### 💡 Bonus: Example Flask Bridge for Ollama
 
-WordPress and LibreTranslate use a specific JSON format for translation requests. Ollama, however, expects a different format (prompts and models). To make them talk to each other perfectly, you can run a lightweight Python "bridge" using Flask.
+LibreTranslate use a specific JSON format for translation requests and no need of other scripts.
+Ollama, however, expects a different format (prompts and models), to make them talk to each other perfectly you can run a lightweight Python "bridge" using Flask.
 
 Here is a ready-to-use example script. 
 
@@ -179,70 +180,255 @@ pip install flask requests flask-cors
 **2. Create a file named `app.py` and paste this code:**
 
 ```python
+"""
+Ollama Translation Proxy with Async Job Management
+Provides a Flask API layer between local LLMs (via Ollama) and web applications.
+Includes anti-hallucination regex for markdown artifacts and thread-safe job cancellation.
+"""
+
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 import requests
+import re
+import threading
 
 app = Flask(__name__)
-CORS(app) # Allow cross-origin requests
 
-# Configuration
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "gemma3n:e2b" # Change this to your downloaded model (this one is very small and fast good for testing)
+# =============================================================
+# OLLAMA & MODEL CONFIGURATION
+# =============================================================
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+MODEL_NAME = "gemma3:4b" # Customize this with your preferred local model
 
-@app.route('/translate', methods=['POST'])
-def translate():
-    # Read the incoming request from FreedomTranslate plugin
-    data = request.json
+# =============================================================
+# ACTIVE JOBS REGISTRY (hashkey → threading.Event)
+# =============================================================
+_jobs_lock = threading.Lock()
+_active_jobs = {}
+
+def register_job(job_id):
+    stop_event = threading.Event()
+    with _jobs_lock:
+        _active_jobs[job_id] = stop_event
+    return stop_event
+
+def unregister_job(job_id):
+    with _jobs_lock:
+        _active_jobs.pop(job_id, None)
+
+def cancel_job(job_id):
+    with _jobs_lock:
+        event = _active_jobs.get(job_id)
+    if event:
+        event.set()
+        return True
+    return False
+
+# =============================================================
+# OUTPUT CLEANING FUNCTION (ANTI-HALLUCINATION)
+# =============================================================
+def clean_translation(text: str) -> str:
+    """
+    Cleans the output from thinking blocks, spurious HTML tags,
+    markdown formatting, or labels erroneously added by the model.
+    """
+    # 1. Remove the entire <thinking>...</thinking> block (typical in newer models)
+    cleaned = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    # 2. Remove any prefixes like "Text:" or "Testo:"
+    cleaned = re.sub(r'^(Text:\s*|Testo:\s*)', '', cleaned, flags=re.IGNORECASE).strip()
     
-    # Handle single string or array of strings (chunks)
-    text_input = data.get('q', '')
-    if isinstance(text_input, list):
-        text_input = '\n'.join(text_input)
+    # 3. Strip hallucinated markdown code blocks (e.g., ```html and closing ```)
+    cleaned = re.sub(r'^```[a-zA-Z]*\s*', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*```$', '', cleaned)
 
-    source_lang = data.get('source', 'auto')
-    target_lang = data.get('target', 'en')
+    # 4. List of single labels to preserve if the text consists ONLY of them
+    single_labels = [
+        "city name", "country", "address", "street", "zip code",
+        "postal code", "state", "province", "email", "phone number"
+    ]
 
-    # Build the AI Prompt
-    # We instruct the AI to act as a professional translator and preserve HTML
-    prompt = (
-        f"You are a professional web translator. "
-        f"Translate the following HTML content from {source_lang} to {target_lang}. "
-        f"CRITICAL: Preserve all HTML tags, shortcodes, and attributes exactly as they are. "
-        f"Output ONLY the translated text, without any explanations or markdown code blocks.\n\n"
-        f"{text_input}"
-    )
+    if cleaned.lower() in single_labels:
+        return cleaned
 
-    # Prepare payload for Ollama
+    # 5. Cleanup of complex patterns (e.g., "City name (optional)")
+    pattern = r"\b(city name|country|address|street|zip code|postal code|state|province|email|phone number)\s*\([^)]*(optional|probably|translation|untranslated)[^)]*\)"
+    cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\([^)]*(optional|probably|translation|untranslated)[^)]*\)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(City name|Country|Address|Street|Zip code|Postal code|State|Province|Email|Phone number)", "", cleaned, flags=re.IGNORECASE)
+
+    # 6. Remove double spaces and trim edges
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    return cleaned
+
+# =============================================================
+# OLLAMA DIRECT CALL
+# =============================================================
+def call_ollama(prompt, stop_event=None):
+    """
+    Sends the request to Ollama with optimized parameters.
+    If stop_event is already set before the call, it aborts immediately.
+    """
+    if stop_event and stop_event.is_set():
+        print(f"[OLLAMA] Job cancelled before initiating the call.")
+        return None
+
     payload = {
         "model": MODEL_NAME,
         "prompt": prompt,
         "stream": False,
+        "raw": False,      # Allows Ollama to use the model's native template
+        "keep_alive": -1,  # KEEPS MODEL IN RAM FOREVER (Prevents slow cold starts)
         "options": {
-            "num_ctx": 8192,      # Increase context for large HTML chunks
-            "num_predict": 4096   # Ensure long responses don't get cut off
+            "temperature": 0.1,    # Low temp for highly accurate translations
+            "top_p": 0.9,
+            "num_predict": 4096,   # Max length of the generated response
+            "num_ctx": 8192        # Context window optimized for large text chunks
         }
     }
 
     try:
-        # Send request to local Ollama server
-        response = requests.post(OLLAMA_URL, json=payload)
+        # Timeout at 900s (15m) to allow heavy local processing without breaking connections
+        response = requests.post(OLLAMA_URL, json=payload, timeout=900)
         response.raise_for_status()
-        
-        # Extract the translation
-        translated_text = response.json().get('response', '').strip()
-        
-        # Return in LibreTranslate format expected by the plugin
-        return jsonify({"translatedText": translated_text})
 
+        # Post-response check: discard the result if cancellation arrived during generation
+        if stop_event and stop_event.is_set():
+            print(f"[OLLAMA] Job cancelled after generation, result discarded.")
+            return None
+
+        return response.json().get('response', '').strip()
     except Exception as e:
-        print(f"Error during translation: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f"Ollama Connection Error: {e}")
+        return None
 
+# =============================================================
+# TRANSLATION LOGIC & PROMPTING
+# =============================================================
+def translate_logic(text, source_lang, target_lang, is_html=False, stop_event=None):
+    """
+    Builds the correct prompt and handles the translation pipeline.
+    """
+    if source_lang.lower() == target_lang.lower():
+        return text
+
+    if stop_event and stop_event.is_set():
+        return text
+
+    if is_html:
+        prompt = (
+            f"You are a professional web systems translator. Translate the following HTML content from '{source_lang}' to '{target_lang}'.\n"
+            "CRITICAL RULES:\n"
+            f"- You MUST translate 100% of the visible text into '{target_lang}'.\n"
+            f"- DO NOT leave any words or phrases in '{source_lang}' unless they are specific brand names.\n"
+            "- DO NOT modify HTML tags, attributes (href, src, class, id), or entities.\n"
+            "- Return ONLY the translated HTML, without any thinking process or explanation.\n\n"
+            f"HTML to translate:\n{text}"
+        )
+    else:
+        prompt = (
+            f"You are a professional translator from '{source_lang}' to '{target_lang}'.\n"
+            "Provide ONLY the translated text. NO explanations, NO introductions, NO quotes, do NOT echo the original text.\n\n"
+            f"Text to translate:\n{text}"
+        )
+
+    translated = call_ollama(prompt, stop_event=stop_event)
+    if translated:
+        return clean_translation(translated)
+    return text
+
+# =============================================================
+# FLASK API ROUTES
+# =============================================================
+@app.route('/translate', methods=['POST'])
+def translate_route():
+    """
+    Main endpoint for text and HTML translation.
+    Accepts 'q' (text), 'source', 'target', and 'format' parameters.
+    Optionally supports 'job_id' to allow asynchronous cancellation.
+    """
+    data = request.get_json() if request.is_json else request.form
+
+    text = data.get('q', data.get('text', ''))
+    source = data.get('source', 'auto')
+    target = data.get('target', 'en')
+    format_type = data.get('format', 'text')  
+    job_id = data.get('job_id', None)         
+
+    if not text:
+        return jsonify({'error': 'Missing text parameter'}), 400
+
+    # Enhanced HTML detection
+    is_html = (format_type == 'html') or ('<' in text and '>' in text)
+
+    # Register the job if a job_id is provided
+    stop_event = None
+    if job_id:
+        stop_event = register_job(job_id)
+        print(f"[JOB] Registered job_id={job_id}")
+
+    try:
+        translated = translate_logic(text, source, target, is_html, stop_event=stop_event)
+    finally:
+        if job_id:
+            unregister_job(job_id)
+            print(f"[JOB] Removed job_id={job_id}")
+
+    # Signal cancellation in the response if the stop event was triggered
+    if stop_event and stop_event.is_set():
+        return jsonify({'translatedText': None, 'cancelled': True}), 200
+
+    return jsonify({'translatedText': translated})
+
+
+@app.route('/cancel', methods=['POST'])
+def cancel_route():
+    """
+    Endpoint to cancel an ongoing translation job.
+
+    Expected JSON body for single cancellation:
+        { "job_id": "<hashkey>" }
+    Expected JSON body for bulk cancellation:
+        { "job_ids": ["<hashkey1>", "<hashkey2>"] }
+    """
+    data = request.get_json(silent=True) or {}
+
+    # Single job cancellation
+    if 'job_id' in data:
+        job_id = data['job_id']
+        found = cancel_job(job_id)
+        print(f"[CANCEL] job_id={job_id} → {'cancelled' if found else 'not found'}")
+        return jsonify({'status': 'cancelled' if found else 'not_found', 'job_id': job_id})
+
+    # Bulk cancellation
+    if 'job_ids' in data:
+        results = {}
+        for jid in data['job_ids']:
+            found = cancel_job(jid)
+            results[jid] = 'cancelled' if found else 'not_found'
+            print(f"[CANCEL BULK] job_id={jid} → {results[jid]}")
+        return jsonify({'status': 'ok', 'results': results})
+
+    return jsonify({'error': 'Missing job_id or job_ids parameter'}), 400
+
+
+@app.route('/status', methods=['GET'])
+def status_route():
+    """
+    Debug endpoint: lists currently active translation jobs.
+    """
+    with _jobs_lock:
+        active = {jid: ev.is_set() for jid, ev in _active_jobs.items()}
+    return jsonify({'active_jobs': active, 'count': len(active)})
+
+
+# =============================================================
+# SERVER STARTUP
+# =============================================================
 if __name__ == '__main__':
-    # Run the server on port 5000 (accessible from your local network)
-    print("Starting FreedomTranslate Flask Bridge for Ollama...")
-    app.run(host='0.0.0.0', port=5000)
+    # Running on 127.0.0.1 to prevent unauthorized external network access.
+    # Change to '0.0.0.0' only if you need to expose the API to your local LAN.
+    app.run(host='127.0.0.1', port=5005, threaded=True)
 ```
 
 **3. Run the bridge:**
