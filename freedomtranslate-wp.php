@@ -682,8 +682,14 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     $max_execution_time = $api_timeout + 10;
 
     while ($done_chunks < $total_chunks) {
-        // Double check kill switch during heavy loops
-        if (get_transient('ft_kill_switch')) return; 
+        // Double check kill switch or pause signal during heavy loops
+        if (get_transient('ft_kill_switch') || get_transient('ft_pause_' . $hash_key)) { 
+            if (get_transient('ft_pause_' . $hash_key)) {
+                delete_transient('ft_pause_' . $hash_key);
+                ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'paused', $total_chunks);
+            }
+            return; 
+        } 
 
         // Check selected translation engine
         $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
@@ -1071,12 +1077,15 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                 $nonce_val = wp_create_nonce('ft_queue_action');
                 $html = '<div style="display: flex; gap: 8px; align-items: center;">';
                 
-                if (in_array($item['status'], ['pending', 'timeout'])) {
-                    $btn_text = ($item['status'] === 'timeout') ? 'Restart Job' : 'Start Now';
+                if (in_array($item['status'], ['pending', 'timeout', 'paused'])) {
+                    $btn_text = in_array($item['status'], ['timeout', 'paused']) ? 'Resume Job' : 'Start Now';
                     $html .= '<button class="button button-small button-primary ft-ajax-start" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">' . $btn_text . '</button>';
                 }
+                if (in_array($item['status'], ['pending', 'processing'])) {
+                    $html .= '<button class="button button-small ft-ajax-pause" style="margin-left: 4px;" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">Pause</button>';
+                }
 
-                $html .= '<button class="button button-small ft-ajax-cancel" style="color: #d63638; border-color: #d63638;" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">Cancel</button>';
+                $html .= '<button class="button button-small ft-ajax-cancel" style="color: #d63638; border-color: #d63638; margin-left: 4px;" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">Cancel</button>';
                 $html .= '</div>';
                 
                 return $html;
@@ -1094,7 +1103,7 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
         global $wpdb;
         $table = $wpdb->prefix . 'freedomtranslate_cache';
         
-        $db_jobs = $wpdb->get_results("SELECT * FROM $table WHERE status IN ('pending', 'processing', 'timeout')");
+       $db_jobs = $wpdb->get_results("SELECT * FROM $table WHERE status IN ('pending', 'processing', 'timeout', 'paused')");
         $unified_data = [];
 
         foreach ($db_jobs as $job) {
@@ -2236,12 +2245,16 @@ document.addEventListener("DOMContentLoaded", function() {
     var ajaxUrl = "<?php echo admin_url('admin-ajax.php'); ?>";
 
     document.body.addEventListener('click', function(e) {
-        if (e.target.classList.contains('ft-ajax-start') || e.target.classList.contains('ft-ajax-cancel')) {
+        if (e.target.classList.contains('ft-ajax-start') || e.target.classList.contains('ft-ajax-cancel') || e.target.classList.contains('ft-ajax-pause')) {
             e.preventDefault();
             var btn = e.target;
-            var action = btn.classList.contains('ft-ajax-start') ? 'ft_queue_start' : 'ft_queue_cancel';
+            
+            var action = '';
+            if (btn.classList.contains('ft-ajax-start')) action = 'ft_queue_start';
+            else if (btn.classList.contains('ft-ajax-cancel')) action = 'ft_queue_cancel';
+            else if (btn.classList.contains('ft-ajax-pause')) action = 'ft_queue_pause';
 
-            if (action === 'ft_queue_cancel' && !confirm('Sei sicuro di voler cancellare questa traduzione?')) return;
+            if (action === 'ft_queue_cancel' && !confirm('Sei sicuro di voler cancellare questa traduzione? I dati verranno distrutti.')) return;
 
             btn.disabled = true;
             btn.textContent = '...';
@@ -2255,14 +2268,16 @@ document.addEventListener("DOMContentLoaded", function() {
             fetch(ajaxUrl, { method: 'POST', body: formData })
             .then(res => res.json())
             .then(data => {
-                if (action === 'ft_queue_start' && data.success) btn.style.display = 'none';
+                if ((action === 'ft_queue_start' || action === 'ft_queue_pause') && data.success) {
+                    btn.style.display = 'none';
+                }
             });
         }
     });
 
     var hasTableOnLoad = document.querySelector('.wp-list-table') !== null;
 
-    // Loop della progress bar
+    // Loop progress bar
     setInterval(function() {
         if (!hasTableOnLoad) return; 
 
@@ -2308,7 +2323,7 @@ document.addEventListener("DOMContentLoaded", function() {
                         var safe_id = wrap.id.replace('ft_status_wrap_', '');
 
                         if (!data[safe_id]) {
-                            // Smooth fade out if job is completed/removed
+                            // Smooth fade out if job is completed/removed from queue
                             var row = wrap.closest('tr');
                             if (row && row.style.opacity !== '0.2') {
                                 row.style.transition = 'opacity 0.6s ease';
@@ -2320,52 +2335,62 @@ document.addEventListener("DOMContentLoaded", function() {
                         
                         var job = data[safe_id];
                         
-                        // --- SOFT FREEZE DETECTION (SNAIL MODE) ---
+                        // --- SOFT FREEZE DETECTION (SNAIL MODE - 5 MINUTES) ---
                         var isSlow = false;
                         if (job.s === 'processing') {
                             if (!window.ftProgressTracker[safe_id]) {
                                 window.ftProgressTracker[safe_id] = { p: job.p, time: nowTime };
                             } else {
                                 if (window.ftProgressTracker[safe_id].p !== job.p) {
-                                    // Chunk progressed, reset timer
                                     window.ftProgressTracker[safe_id].p = job.p;
                                     window.ftProgressTracker[safe_id].time = nowTime;
-                                } else if ((nowTime - window.ftProgressTracker[safe_id].time) > 120000) {
-                                    // 2 minutes without progress = slow AI processing
+                                } else if ((nowTime - window.ftProgressTracker[safe_id].time) > 300000) {
                                     isSlow = true;
                                 }
                             }
                         } else {
-                            // Clear tracker if the job is no longer processing
                             if (window.ftProgressTracker[safe_id]) delete window.ftProgressTracker[safe_id];
                         }
 
-                        // Update status badge
+                        // 1. Update status badge colors
                         var badge = document.getElementById('ft_status_badge_' + safe_id);
                         if (badge) {
                             badge.textContent = job.s.toUpperCase();
                             if (job.s === 'pending') badge.style.background = '#f0b849';
                             else if (job.s === 'processing') badge.style.background = '#2271b1';
-                            else if (job.s === 'timeout') badge.style.background = '#d63638'; // Red badge
+                            else if (job.s === 'timeout') badge.style.background = '#d63638';
+                            else if (job.s === 'paused') badge.style.background = '#8e44ad'; // Purple for Paused
                             else badge.style.background = '#72777c';
                         }
-
-                        //start button
+                        
+                        // 2. DYNAMIC BUTTON LOGIC (Show/Hide Start, Pause, Cancel)
                         var rowNode = wrap.closest('tr');
                         if (rowNode) {
                             var actionBtn = rowNode.querySelector('.ft-ajax-start');
+                            var pauseBtn = rowNode.querySelector('.ft-ajax-pause');
+                            
                             if (actionBtn) {
                                 if (job.s === 'processing') {
                                     actionBtn.style.display = 'none';
-                                } else if (job.s === 'timeout' || job.s === 'pending') {
+                                } else if (job.s === 'timeout' || job.s === 'pending' || job.s === 'paused') {
                                     actionBtn.style.display = 'inline-block';
-                                    actionBtn.textContent = (job.s === 'timeout') ? 'Restart Job' : 'Start Now';
+                                    actionBtn.textContent = (job.s === 'timeout' || job.s === 'paused') ? 'Resume Job' : 'Start Now';
                                     actionBtn.disabled = false;
+                                }
+                            }
+                            if (pauseBtn) {
+                                // Only show pause if the job is active or waiting in queue
+                                if (job.s === 'processing' || job.s === 'pending') {
+                                    pauseBtn.style.display = 'inline-block';
+                                    pauseBtn.textContent = 'Pause';
+                                    pauseBtn.disabled = false;
+                                } else {
+                                    pauseBtn.style.display = 'none';
                                 }
                             }
                         }
                         
-                        // Update progress bar
+                        // 3. Update progress bar fill and text labels
                         var barFill = document.getElementById('ft_bar_fill_' + safe_id);
                         var barText = document.getElementById('ft_bar_text_' + safe_id);
                         
@@ -2373,19 +2398,20 @@ document.addEventListener("DOMContentLoaded", function() {
                             var visual_width = 5;
                             var label = 'Chunk: ' + job.p + ' / ? (Waiting...)';
                             
-                            // HARD TIMEOUT DETECTED
                             if (job.s === 'timeout') {
-                                barFill.style.background = '#d63638';
+                                barFill.style.background = '#d63638'; // Red
                                 barFill.style.width = '100%';
                                 barText.textContent = 'API TIMEOUT ❌ (Needs Restart)';
                                 barText.style.color = '#fff';
+                            } else if (job.s === 'paused') {
+                                barFill.style.background = '#8e44ad'; // Purple
+                                barFill.style.width = (job.t > 0) ? Math.max(5, Math.round((job.p / job.t) * 100)) + '%' : '100%';
+                                barText.textContent = 'PAUSED ⏸️ (Chunk ' + job.p + '/' + job.t + ')';
+                                barText.style.color = '#fff';
                             } else {
-                                // Apply visual changes for slow jobs (Snail mode)
-                                if (isSlow) {
-                                    barFill.style.background = '#f39c12'; // Orange/Yellow
-                                } else {
-                                    barFill.style.background = '#27ae60'; // Standard Green
-                                }
+                                // Default Green or Yellow (Snail)
+                                if (isSlow) barFill.style.background = '#f39c12';
+                                else barFill.style.background = '#27ae60';
                                 
                                 if (job.t > 0) {
                                     var percent = Math.round((job.p / job.t) * 100);
@@ -2642,7 +2668,7 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
     $table = $wpdb->prefix . 'freedomtranslate_cache';
     
     // Fetch active jobs from the custom database table
-    $db_jobs = $wpdb->get_results("SELECT hash_key, post_id, target_lang, status, progress, total_chunks FROM $table WHERE status IN ('pending', 'processing', 'timeout')");
+    $db_jobs = $wpdb->get_results("SELECT hash_key, post_id, target_lang, status, progress, total_chunks FROM $table WHERE status IN ('pending', 'processing', 'timeout', 'paused')");
     $unified = [];
     
     foreach ($db_jobs as $job) {
@@ -2708,13 +2734,54 @@ add_action('wp_ajax_ft_queue_start', function() {
 
     global $wpdb;
     $table = $wpdb->prefix . 'freedomtranslate_cache';
-    $job = $wpdb->get_row($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status IN ('pending', 'timeout') LIMIT 1", $p_id, $lang));
+
+    $job = $wpdb->get_row($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status IN ('pending', 'timeout', 'paused') LIMIT 1", $p_id, $lang));
     
     if ($job) {
         $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $job->hash_key]);
         $site_lang = substr(get_locale(), 0, 2);
         $args = [$job->hash_key, $site_lang, $lang, $p_id, uniqid('', true)];
         wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
+    }
+    wp_send_json_success();
+});
+
+add_action('wp_ajax_ft_queue_pause', function() {
+    check_ajax_referer('ft_queue_action', 'nonce');
+    $p_id_raw = $_POST['post_id'];
+    $lang = sanitize_text_field($_POST['lang']);
+    $is_string = (strpos($p_id_raw, 'String: ') === 0);
+    $p_id = $is_string ? sanitize_text_field($p_id_raw) : intval($p_id_raw);
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'freedomtranslate_cache';
+
+    if (!$is_string) {
+        $hashes = $wpdb->get_col($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status IN ('pending', 'processing')", $p_id, $lang));
+        if (!empty($hashes)) {
+            foreach($hashes as $h) {
+                // Send stop signal to the active worker
+                set_transient('ft_pause_' . $h, '1', 600); 
+                $wpdb->update($table, ['status' => 'paused'], ['hash_key' => $h]);
+            }
+        }
+    }
+
+    // Remove from scheduled cron so it doesn't auto-restart
+    $crons = _get_cron_array();
+    if (is_array($crons)) {
+        $changed = false;
+        foreach ($crons as $timestamp => $cron_hooks) {
+            if (isset($cron_hooks['freedomtranslate_async_translate'])) {
+                foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
+                    if (isset($event['args'][3]) && $event['args'][3] == $p_id && isset($event['args'][2]) && $event['args'][2] === $lang) {
+                        unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
+                        $changed = true;
+                    }
+                }
+            }
+        }
+        if ($changed) update_option('cron', $crons);
     }
     wp_send_json_success();
 });
