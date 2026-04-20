@@ -1738,7 +1738,7 @@ function freedomtranslate_settings_page() {
 
     $wpdb->query("DELETE FROM $table WHERE hash_key LIKE '%_chunk_%'");
 
-    $wpdb->query("DELETE FROM $table WHERE status IN ('pending', 'processing')");
+    $wpdb->query("DELETE FROM $table WHERE status IN ('pending', 'processing', 'timeout', 'paused')");
 
     echo '<div class="notice notice-success"><p>🚨 PANIC BUTTON ACTIVATED: All active background workers killed, queue cleared, and half-baked translations removed from the database.</p></div>';
 }
