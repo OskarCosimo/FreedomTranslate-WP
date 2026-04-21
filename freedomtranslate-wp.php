@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.0.0
+Version: 2.0.1
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -607,6 +607,9 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
 
     $max_concurrent = max(1, (int) get_option(FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION, 2));
     $current_status = ft_get_status_db($hash_key);
+    if ($current_status && $current_status->status === 'completed') {
+        return;
+    }
     $is_processing = ($current_status && $current_status->status === 'processing');
 
     if (!$is_processing) {
@@ -716,7 +719,10 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
 
         // Break loop and reschedule if execution time limit is reached
         if ($done_chunks < $total_chunks && (time() - $start_time) >= $max_execution_time) {
-            wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $user_lang, $post_id, uniqid('', true)]);
+            $args = [$hash_key, $site_lang, $user_lang, $post_id];
+            if (!wp_next_scheduled('freedomtranslate_async_translate', $args)) {
+                wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
+            }
             return; 
         }
     }
@@ -752,9 +758,11 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     // Look for the next pending job in the queue and start it
     $next_job = $wpdb->get_row("SELECT hash_key, target_lang, post_id FROM $table WHERE status = 'pending' LIMIT 1");
     if ($next_job) {
-        wp_schedule_single_event(time() + 2, 'freedomtranslate_async_translate', [
-            $next_job->hash_key, $site_lang, $next_job->target_lang, $next_job->post_id, uniqid('', true)
-        ]);
+        $args = [$next_job->hash_key, $site_lang, $next_job->target_lang, $next_job->post_id];
+        // create next work only if not exist
+        if (!wp_next_scheduled('freedomtranslate_async_translate', $args)) {
+            wp_schedule_single_event(time() + 2, 'freedomtranslate_async_translate', $args);
+        }
     }
 }
 
@@ -1393,7 +1401,7 @@ function freedomtranslate_settings_page() {
                     
                     if (!empty($post->post_title)) {
                         ft_update_progress($t_hash, $post_id, $lang, 0, 'pending');
-                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id]);
                         $delay += 5; 
                         $queued_count++;
                     }
@@ -1404,7 +1412,7 @@ function freedomtranslate_settings_page() {
                     
                     if (!empty($post->post_content)) {
                         ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
-                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id]);
                         $delay += 45;
                         $queued_count++;
                     }
@@ -1415,7 +1423,7 @@ function freedomtranslate_settings_page() {
                     
                     if (!empty($post->post_excerpt)) {
                         ft_update_progress($e_hash, $post_id, $lang, 0, 'pending');
-                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$e_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$e_hash, $site_lang, $lang, $post_id]);
                         $delay += 15;
                         $queued_count++;
                     }
@@ -1428,6 +1436,7 @@ function freedomtranslate_settings_page() {
             echo '<div class="notice notice-error"><p>Please enter a valid URL/ID and select at least one language.</p></div>';
         }
     }
+
     // --- HANDLERS: START, CANCEL & DELETE ---
     if (isset($_GET['ft_msg'])) {
         $msg = sanitize_text_field($_GET['ft_msg']);
