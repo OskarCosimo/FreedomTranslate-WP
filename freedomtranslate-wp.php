@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.0.1
+Version: 2.0.2
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -2531,15 +2531,29 @@ add_action('init', function() {
 });
 
 /**
- * AUTO-PREWARM ON SAVE
+ * AUTO-PREWARM ON SAVE & METABOX DATA SAVING
  */
 add_action('save_post', function($post_id) {
+
+    if (isset($_POST['ft_meta_nonce']) && wp_verify_nonce($_POST['ft_meta_nonce'], 'ft_meta_save')) {
+        if (!defined('DOING_AUTOSAVE') || !DOING_AUTOSAVE) {
+            if (current_user_can('edit_post', $post_id)) {
+                $exclude = isset($_POST['ft_exclude_post']) ? '1' : '0';
+                update_post_meta($post_id, '_freedomtranslate_exclude', $exclude);
+
+                $inject = isset($_POST['ft_inject_selector']) ? '1' : '0';
+                update_post_meta($post_id, '_freedomtranslate_inject_selector', $inject);
+            }
+        }
+    }
+
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
     if (wp_is_post_revision($post_id)) return;
     if (isset($_GET['meta-box-loader'])) return;
     if (strpos($_SERVER['REQUEST_URI'] ?? '', 'meta-box-loader') !== false) return;
 
     if (get_option('freedomtranslate_prewarm_on_save', '0') !== '1') return;
+
     if (get_post_meta($post_id, '_freedomtranslate_exclude', true) === '1') return;
 
     $post = get_post($post_id);
@@ -2556,22 +2570,20 @@ add_action('save_post', function($post_id) {
     foreach ($enabled_langs as $lang) {
         if ($lang === $site_lang) continue;
 
-        // ── POST CONTENT ──
+        // POST CONTENT
         if (!empty($content)) {
             $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
             $status_data = ft_get_status_db($c_hash);
-            
             if (!$status_data) {
                 ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
                 wp_schedule_single_event(time() + 5, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
             }
         }
 
-        // ── POST TITLE ──
+        // POST TITLE
         if (!empty($title)) {
             $t_hash = md5("post_{$post_id}_the_title_{$lang}") . '_the_title';
             $status_data = ft_get_status_db($t_hash);
-            
             if (!$status_data) {
                 ft_update_progress($t_hash, $post_id, $lang, 0, 'pending');
                 wp_schedule_single_event(time() + 5, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id]);
@@ -2905,3 +2917,44 @@ add_action('wp_ajax_ft_check_existing_translations', function() {
 
     wp_send_json(['exists' => $existing]);
 });
+
+// ========================================================================
+// RECOVERY: METABOX FOR EXCLUDING POSTS
+// ========================================================================
+
+add_action('add_meta_boxes', function() {
+    $post_types = get_post_types(['public' => true]);
+    foreach ($post_types as $type) {
+        add_meta_box(
+            'ft_exclude_metabox',
+            'FreedomTranslate Options',
+            'freedomtranslate_exclude_metabox_html',
+            $type,
+            'side',
+            'default'
+        );
+    }
+});
+
+function freedomtranslate_exclude_metabox_html($post) {
+    $exclude_val = get_post_meta($post->ID, '_freedomtranslate_exclude', true);
+    $inject_val  = get_post_meta($post->ID, '_freedomtranslate_inject_selector', true);
+    wp_nonce_field('ft_meta_save', 'ft_meta_nonce');
+    ?>
+    <p>
+        <label>
+            <input type="checkbox" name="ft_exclude_post" value="1" <?php checked($exclude_val, '1'); ?>>
+            <strong>Exclude from translation</strong>
+        </label>
+    </p>
+    <p class="description">If active, the plugin will not show the translations.</p>
+    <hr>
+    <p>
+        <label>
+            <input type="checkbox" name="ft_inject_selector" value="1" <?php checked($inject_val, '1'); ?>>
+            <strong>Show language selector</strong>
+        </label>
+    </p>
+    <p class="description">Show the language selector at the top of this post/page.</p>
+    <?php
+}
