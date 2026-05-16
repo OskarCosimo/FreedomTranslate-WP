@@ -13,6 +13,7 @@
   - [Embed Language Selector](#embed-language-selector)
   - [Static Strings (Headers/Footers)](#static-strings-headersfooters)
   - [Language Detection Modes](#language-detection-modes)
+  - [Manual Translation Editing](#manual-translation-editing)
   - [Exclude Posts or Pages](#exclude-posts-or-pages)
 - [Admin Panel](#admin-panel)
   - [General & API](#general--api)
@@ -37,6 +38,7 @@
 - 🧠 **Local AI & Ollama Ready** - Fully optimized to work with a local Flask bridge running advanced LLMs (like Gemma 4) for private, high-quality translations.
 - 🚦 **Unified Translation Queue** - Prevents server overload! Background translations are neatly queued and processed asynchronously to protect your AI server's RAM and CPU.
 - 🎛️ **Direct Translate Panel** - Manually push specific posts or entire pages to the translation queue for batch/overnight processing.
+- ✍️ **Manual Visual Editor** - Fine-tune and correct AI translations directly from the WordPress post editor using a dedicated, safe AJAX-powered visual interface without risking your original content.
 - 🎚️ **Concurrency Control** - Set the `Max Concurrent Translations` limit to dictate exactly how many tasks hit your AI server at once.
 - 🚀 **Auto-Translate on Save (Pre-warming)** - Automatically queues and translates posts in the background for all enabled languages the moment you publish or update them (can be disabled for Strict Manual Mode).
 - 🛡️ **Advanced HTML Chunking** - Safely translates massive WordPress posts by splitting them into smart chunks, preserving all HTML tags and shortcodes intact.
@@ -80,77 +82,101 @@ Use the shortcode anywhere in your theme or posts:
 
 ```text
 [freedomtranslate_selector]
+
 ```
 
 This will render a dropdown with all enabled languages and a mode indicator icon:
-- 🌐 = Automatic browser detection
-- 📌 = Manual admin-defined default
+
+* 🌐 = Automatic browser detection
+* 📌 = Manual admin-defined default
 
 ### Static Strings (Headers/Footers)
 
 To translate global theme elements that are not part of the standard post content:
+
 1. Go to **Settings → FreedomTranslate → Static Strings**.
 2. Add a new string (e.g., ID: `footer_credits`, Text: `All rights reserved`).
 3. The plugin will instantly translate it. Use the shortcode inside your theme/widget:
-   ```text
-   [ft_string id="footer_credits"]
-   ```
+```text
+[ft_string id="footer_credits"]
+
+```
+
+
 
 ### Language Detection Modes
 
 **Automatic Mode** 🌐: Detected from user's browser. User can change it anytime.
 **Manual Mode** 📌: Admin sets a default language. No browser detection.
 
+### Manual Translation Editing
+
+If you need to correct or tweak an AI-generated translation:
+
+1. Open the post or page in the WordPress editor.
+2. Scroll down to the **FreedomTranslate - Manual Editor** metabox.
+3. Select the target language from the dropdown to fetch the current translation from the database.
+4. Edit the Translated Title, Excerpt, or Content using the integrated visual editor (TinyMCE).
+5. Click **Save Manual Translation**.
+
+*Note: Manual edits are saved directly to the custom translation cache. If you trigger a new automatic background translation for that specific post and language, your manual edits will be overwritten by the new AI generation.*
+
 ---
 
 ## Admin Panel
 
-Navigate to:  
+Navigate to:
+
 **WordPress Admin → Settings → FreedomTranslate**
 
 The panel is now organized into powerful, dynamic tabs:
 
 ### General & API
-- **Select Engine**: Choose between AI/LibreTranslate, Google Free, or Google Official.
-- **API Configuration**: Enter your endpoints (e.g., your Flask Python server IP).
-- **Processing Mode**: Choose Async (Background) or Sync (Real-time).
-- **Max Concurrent Translations**: Throttle your AI server. Set to `1` if you are sharing your local AI hardware with other apps (like a Chatbot).
-- **Automation & Cache**: Enable/Disable "Auto-Translate on Save" (disable for Strict Manual Mode) and manage global Cache TTL.
+
+* **Select Engine**: Choose between AI/LibreTranslate, Google Free, or Google Official.
+* **API Configuration**: Enter your endpoints (e.g., your Flask Python server IP).
+* **Processing Mode**: Choose Async (Background) or Sync (Real-time).
+* **Max Concurrent Translations**: Throttle your AI server. Set to `1` if you are sharing your local AI hardware with other apps (like a Chatbot).
+* **Automation & Cache**: Enable/Disable "Auto-Translate on Save" (disable for Strict Manual Mode) and manage global Cache TTL.
 
 ### Languages
-- Enable or disable specific languages from the available list.
+
+* Enable or disable specific languages from the available list.
 
 ### Direct Translate & Queue
-- **Direct Translate**: Select a specific Post/Page, select target languages, and push them directly to the queue. Perfect for overnight batch translations.
-- **Unified Queue Monitor**: View currently processing translations and clear the queue if needed.
+
+* **Direct Translate**: Select a specific Post/Page, select target languages, and push them directly to the queue. Perfect for overnight batch translations.
+* **Unified Queue Monitor**: View currently processing translations and clear the queue if needed.
 
 ### Static Strings
-- Manage and translate custom strings for Headers, Footers, and Widgets.
+
+* Manage and translate custom strings for Headers, Footers, and Widgets.
 
 ### Tools
-- **Clear translation cache**: One-click button to flush all saved translations.
+
+* **Clear translation cache**: One-click button to flush all saved translations.
 
 ---
 
 ## Supported Languages
 
-| Code | Language       | Code | Language       |
-|------|----------------|------|----------------|
-| en   | English        | ar   | Arabic         |
-| it   | Italiano       | az   | Azerbaijani    |
-| es   | Español        | zh   | Chinese        |
-| fr   | Français       | cs   | Czech          |
-| de   | Deutsch        | da   | Danish         |
-| ru   | Русский        | nl   | Dutch          |
-| pt   | Português      | fi   | Finnish        |
-| el   | Greek          | he   | Hebrew         |
-| hi   | Hindi          | hu   | Hungarian      |
-| id   | Indonesian     | ga   | Irish          |
-| ja   | Japanese       | ko   | Korean         |
-| no   | Norwegian      | pl   | Polish         |
-| ro   | Romanian       | sk   | Slovak         |
-| sv   | Swedish        | tr   | Turkish        |
-| uk   | Ukrainian      | vi   | Vietnamese     |
+| Code | Language | Code | Language |
+| --- | --- | --- | --- |
+| en | English | ar | Arabic |
+| it | Italiano | az | Azerbaijani |
+| es | Español | zh | Chinese |
+| fr | Français | cs | Czech |
+| de | Deutsch | da | Danish |
+| ru | Русский | nl | Dutch |
+| pt | Português | fi | Finnish |
+| el | Greek | he | Hebrew |
+| hi | Hindi | hu | Hungarian |
+| id | Indonesian | ga | Irish |
+| ja | Japanese | ko | Korean |
+| no | Norwegian | pl | Polish |
+| ro | Romanian | sk | Slovak |
+| sv | Swedish | tr | Turkish |
+| uk | Ukrainian | vi | Vietnamese |
 
 You can limit which languages are available via the admin interface.
 
@@ -159,6 +185,7 @@ You can limit which languages are available via the admin interface.
 ## Local AI Setup (Ollama / Flask)
 
 For the ultimate private translation server:
+
 1. Run **Ollama** on your local machine or dedicated server.
 2. Pull an LLM optimized for translations (e.g., `ollama pull gemma3n:e2b`).
 3. Run a **Flask Python bridge** to handle incoming requests from WordPress, chunk the HTML, and communicate with Ollama.
@@ -170,11 +197,13 @@ For the ultimate private translation server:
 LibreTranslate use a specific JSON format for translation requests and no need of other scripts.
 Ollama, however, expects a different format (prompts and models), to make them talk to each other perfectly you can run a lightweight Python "bridge" using Flask.
 
-Here is a ready-to-use example script. 
+Here is a ready-to-use example script.
 
 **1. Install required Python packages:**
+
 ```bash
 pip install flask requests flask-cors
+
 ```
 
 **2. Create a file named `app.py` and paste this code:**
@@ -196,7 +225,7 @@ app = Flask(__name__)
 # =============================================================
 # OLLAMA & MODEL CONFIGURATION
 # =============================================================
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+OLLAMA_URL = "[http://127.0.0.1:11434/api/generate](http://127.0.0.1:11434/api/generate)"
 MODEL_NAME = "gemma3:4b" # Customize this with your preferred local model
 
 # =============================================================
@@ -429,11 +458,14 @@ if __name__ == '__main__':
     # Running on 127.0.0.1 to prevent unauthorized external network access.
     # Change to '0.0.0.0' only if you need to expose the API to your local LAN.
     app.run(host='127.0.0.1', port=5005, threaded=True)
+
 ```
 
 **3. Run the bridge:**
+
 ```bash
 python3 app.py
+
 ```
 
 **4. Connect the Plugin:**
@@ -445,6 +477,7 @@ In your WordPress admin, go to **FreedomTranslate → General & API**. Select `A
 ## Google Cloud Setup
 
 To use the official Google Cloud Translation API (optional):
+
 1. Create a project at [Google Cloud Console](https://console.cloud.google.com/)
 2. Enable the **Cloud Translation API** and set up billing.
 3. Create an API key and enter it in **FreedomTranslate Settings → General & API**.
@@ -453,46 +486,52 @@ To use the official Google Cloud Translation API (optional):
 
 ## Notes
 
-- **AI Server Load Balancing**: The new Unified Queue ensures your server never crashes, even if you translate a massive post into 10 languages at once.
-- **Strict Manual Mode**: If you use your AI server for multiple tasks during the day, disable "Auto-Translate on save". Use the *Direct Translate* panel at night to process translations while you sleep.
-- Translations are cached using WordPress options to improve performance. Cache TTL can be set to `0` to make translations permanent.
+* **AI Server Load Balancing**: The new Unified Queue ensures your server never crashes, even if you translate a massive post into 10 languages at once.
+* **Strict Manual Mode**: If you use your AI server for multiple tasks during the day, disable "Auto-Translate on save". Use the *Direct Translate* panel at night to process translations while you sleep.
+* Translations are cached using WordPress options to improve performance. Cache TTL can be set to `0` to make translations permanent.
 
 ---
 
 ## What's New
 
+**v2.0.2**
+
+* ✍️ **Manual Translation Editor**: Added a dedicated AJAX-powered visual editor (Metabox) to safely fine-tune and override AI translations per post without touching the core WordPress content.
+
 **v1.9.3 (Massive Backend Overhaul)**
-- ✨ **Unified Translation Queue**: No more server crashes! Translations are now elegantly queued and processed sequentially based on your hardware limits.
-- 🎛️ **Direct Translate Panel**: Brand new admin tab to manually push posts to the translation queue. Ideal for overnight batch processing.
-- 🚦 **Concurrency Control**: Added `Max Concurrent Translations` setting to throttle requests to local AI servers (perfect for Ollama multitasking).
-- 🧠 **Local AI & Ollama Optimization**: Enhanced HTML chunking support to work flawlessly with local LLMs (like Gemma 4) via Flask API bridges. 
-- ⏸️ **Strict Manual Mode**: Ability to safely decouple translation from the "Save Post" action to manage server load.
+
+* ✨ **Unified Translation Queue**: No more server crashes! Translations are now elegantly queued and processed sequentially based on your hardware limits.
+* 🎛️ **Direct Translate Panel**: Brand new admin tab to manually push posts to the translation queue. Ideal for overnight batch processing.
+* 🚦 **Concurrency Control**: Added `Max Concurrent Translations` setting to throttle requests to local AI servers (perfect for Ollama multitasking).
+* 🧠 **Local AI & Ollama Optimization**: Enhanced HTML chunking support to work flawlessly with local LLMs (like Gemma 4) via Flask API bridges.
+* ⏸️ **Strict Manual Mode**: Ability to safely decouple translation from the "Save Post" action to manage server load.
 
 **v1.5.5**
-- Massive UI Overhaul with dynamic tabbed Admin Panel.
-- Auto-Prewarm on Save functionality.
-- Static Strings Manager (`[ft_string]`).
-- Infinite Cache (TTL `0`).
+
+* Massive UI Overhaul with dynamic tabbed Admin Panel.
+* Auto-Prewarm on Save functionality.
+* Static Strings Manager (`[ft_string]`).
+* Infinite Cache (TTL `0`).
 
 **v1.4.5 & Below**
-- Added Google Translate support (Free + Official API).
-- Language detection modes (Auto/Manual).
+
+* Added Google Translate support (Free + Official API).
+* Language detection modes (Auto/Manual).
 
 ---
 
 ## Author
 
-**Freedom** 2026 – Licensed under [GPLv3 or later](LICENSE)
+**Freedom** 2026 – Licensed under [GPLv3 or later](https://www.google.com/search?q=LICENSE)
 
 ---
 
 ## License
 
-This plugin is released under the GNU GPLv3 license. See [LICENSE](LICENSE) for full details.
+This plugin is released under the GNU GPLv3 license. See [LICENSE](https://www.google.com/search?q=LICENSE) for full details.
 
 ---
 
 ## Disclaimer
 
 This plugin is not affiliated with or endorsed by LibreTranslate, Google Translate, Ollama, or their respective developers. "LibreTranslate", "Ollama", and "Google Translate" are used solely to describe the APIs and engines that this plugin can interact with.
-```
