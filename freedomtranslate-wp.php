@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.0.3
+Version: 2.0.4
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -2950,7 +2950,7 @@ function freedomtranslate_manual_editor_html($post) {
     // Create a nonce for secure AJAX requests
     $nonce = wp_create_nonce('ft_manual_editor_nonce');
     ?>
-    <div id="ft-manual-editor-container" style="margin-top: 10px;">
+    <div id="ft_manual_editor_container" style="margin-top: 10px;">
         <p>
             <label for="ft_manual_lang" style="font-weight: bold; margin-right: 10px;">Select Language to Edit:</label>
             <select id="ft_manual_lang">
@@ -2963,12 +2963,12 @@ function freedomtranslate_manual_editor_html($post) {
                 }
                 ?>
             </select>
-            <span id="ft-manual-loading" style="display:none; color: #2271b1; font-weight: bold; margin-left: 10px;">
+            <span id="ft_manual_loading" style="display:none; color: #2271b1; font-weight: bold; margin-left: 10px;">
                 <span class="spinner is-active" style="float:none; margin:0 5px 0 0;"></span> Fetching...
             </span>
         </p>
 
-        <div id="ft-manual-fields" style="display:none; margin-top: 15px;">
+        <div id="ft_manual_fields" style="display:none; margin-top: 15px;">
             <div class="notice notice-warning inline" style="margin-bottom: 15px;">
                 <p><strong>Warning:</strong> These edits are saved directly to the translation cache. If you trigger an automatic background translation for this language, these manual changes will be overwritten.</p>
             </div>
@@ -2999,7 +2999,7 @@ function freedomtranslate_manual_editor_html($post) {
             
             <div style="margin-top: 15px; display: flex; align-items: center; gap: 10px;">
                 <button type="button" id="ft_manual_save" class="button button-primary button-large">Save Manual Translation</button>
-                <span id="ft-manual-save-status" style="font-weight: bold;"></span>
+                <span id="ft_manual_save_status" style="font-weight: bold;"></span>
             </div>
         </div>
     </div>
@@ -3010,7 +3010,7 @@ function freedomtranslate_manual_editor_html($post) {
         const fieldsContainer = document.getElementById('ft_manual_fields');
         const loadingIndicator = document.getElementById('ft_manual_loading');
         const saveBtn = document.getElementById('ft_manual_save');
-        const saveStatus = document.getElementById('ft_manual_save-status');
+        const saveStatus = document.getElementById('ft_manual_save_status');
         
         const inputTitle = document.getElementById('ft_manual_title');
         const inputExcerpt = document.getElementById('ft_manual_excerpt');
