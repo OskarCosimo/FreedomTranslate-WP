@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.0.2
+Version: 2.0.3
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -2916,6 +2916,268 @@ add_action('wp_ajax_ft_check_existing_translations', function() {
     }
 
     wp_send_json(['exists' => $existing]);
+});
+
+// ========================================================================
+// 8. MANUAL TRANSLATION EDITOR (METABOX & AJAX) - VISUAL EDITOR
+// ========================================================================
+
+/**
+ * Register the Manual Translation Metabox
+ */
+add_action('add_meta_boxes', function() {
+    $post_types = get_post_types(['public' => true]);
+    foreach ($post_types as $type) {
+        add_meta_box(
+            'ft_manual_translation_metabox',
+            'FreedomTranslate - Manual Editor',
+            'freedomtranslate_manual_editor_html',
+            $type,
+            'normal', // Render below the main editor
+            'high'
+        );
+    }
+});
+
+/**
+ * HTML Output for the Manual Translation Metabox
+ */
+function freedomtranslate_manual_editor_html($post) {
+    $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
+    $site_lang = substr(get_locale(), 0, 2);
+    $all_langs = freedomtranslate_get_all_languages();
+    
+    // Create a nonce for secure AJAX requests
+    $nonce = wp_create_nonce('ft_manual_editor_nonce');
+    ?>
+    <div id="ft-manual-editor-container" style="margin-top: 10px;">
+        <p>
+            <label for="ft_manual_lang" style="font-weight: bold; margin-right: 10px;">Select Language to Edit:</label>
+            <select id="ft_manual_lang">
+                <option value=""><?php echo esc_html(strtoupper($site_lang)); ?> (Default Language - Use main editor)</option>
+                <?php 
+                foreach ($enabled_langs as $lang) {
+                    if ($lang === $site_lang) continue;
+                    $lang_name = isset($all_langs[$lang]) ? $all_langs[$lang] : strtoupper($lang);
+                    echo '<option value="' . esc_attr($lang) . '">' . esc_html($lang_name) . '</option>';
+                }
+                ?>
+            </select>
+            <span id="ft-manual-loading" style="display:none; color: #2271b1; font-weight: bold; margin-left: 10px;">
+                <span class="spinner is-active" style="float:none; margin:0 5px 0 0;"></span> Fetching...
+            </span>
+        </p>
+
+        <div id="ft-manual-fields" style="display:none; margin-top: 15px;">
+            <div class="notice notice-warning inline" style="margin-bottom: 15px;">
+                <p><strong>Warning:</strong> These edits are saved directly to the translation cache. If you trigger an automatic background translation for this language, these manual changes will be overwritten.</p>
+            </div>
+            
+            <p>
+                <label for="ft_manual_title"><strong>Translated Title:</strong></label><br>
+                <input type="text" id="ft_manual_title" style="width: 100%;" class="large-text">
+            </p>
+            
+            <p>
+                <label for="ft_manual_excerpt"><strong>Translated Excerpt:</strong></label><br>
+                <textarea id="ft_manual_excerpt" style="width: 100%;" class="large-text" rows="3"></textarea>
+            </p>
+            
+            <div style="margin-top: 15px;">
+                <label><strong>Translated Content:</strong></label><br>
+                <?php 
+                // Print native WordPress visual editor (TinyMCE)
+                // We keep it hidden initially via the parent div
+                wp_editor( '', 'ft_manual_content', [
+                    'textarea_rows' => 12,
+                    'media_buttons' => true, // Allow media library access
+                    'tinymce'       => true,
+                    'quicktags'     => true,
+                ]); 
+                ?>
+            </div>
+            
+            <div style="margin-top: 15px; display: flex; align-items: center; gap: 10px;">
+                <button type="button" id="ft_manual_save" class="button button-primary button-large">Save Manual Translation</button>
+                <span id="ft-manual-save-status" style="font-weight: bold;"></span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const langSelect = document.getElementById('ft_manual_lang');
+        const fieldsContainer = document.getElementById('ft_manual_fields');
+        const loadingIndicator = document.getElementById('ft_manual_loading');
+        const saveBtn = document.getElementById('ft_manual_save');
+        const saveStatus = document.getElementById('ft_manual_save-status');
+        
+        const inputTitle = document.getElementById('ft_manual_title');
+        const inputExcerpt = document.getElementById('ft_manual_excerpt');
+        
+        const postId = <?php echo intval($post->ID); ?>;
+        const ajaxUrl = ajaxurl; 
+        const nonce = '<?php echo esc_js($nonce); ?>';
+
+        // Safely set content in wp_editor (handles both Visual and Text tabs)
+        function setEditorContent(content) {
+            if (typeof tinymce !== 'undefined' && tinymce.get('ft_manual_content')) {
+                tinymce.get('ft_manual_content').setContent(content);
+            }
+            document.getElementById('ft_manual_content').value = content;
+        }
+
+        // Safely retrieve content from wp_editor
+        function getEditorContent() {
+            if (typeof tinymce !== 'undefined' && tinymce.get('ft_manual_content') && !tinymce.get('ft_manual_content').isHidden()) {
+                return tinymce.get('ft_manual_content').getContent();
+            }
+            return document.getElementById('ft_manual_content').value;
+        }
+
+        // Handle language selection change
+        langSelect.addEventListener('change', function() {
+            const selectedLang = this.value;
+            saveStatus.textContent = '';
+            
+            if (!selectedLang) {
+                fieldsContainer.style.display = 'none';
+                return;
+            }
+
+            fieldsContainer.style.display = 'none';
+            loadingIndicator.style.display = 'inline-block';
+
+            // Fetch current translation from custom DB
+            const formData = new FormData();
+            formData.append('action', 'ft_get_manual_translation');
+            formData.append('nonce', nonce);
+            formData.append('post_id', postId);
+            formData.append('lang', selectedLang);
+
+            fetch(ajaxUrl, { method: 'POST', body: formData })
+                .then(res => res.json())
+                .then(res => {
+                    loadingIndicator.style.display = 'none';
+                    if (res.success) {
+                        inputTitle.value = res.data.title || '';
+                        inputExcerpt.value = res.data.excerpt || '';
+                        setEditorContent(res.data.content || '');
+                        fieldsContainer.style.display = 'block';
+                    } else {
+                        alert('Error fetching translation.');
+                    }
+                })
+                .catch(err => {
+                    loadingIndicator.style.display = 'none';
+                    alert('Network error while fetching.');
+                });
+        });
+
+        // Handle save action
+        saveBtn.addEventListener('click', function() {
+            const selectedLang = langSelect.value;
+            if (!selectedLang) return;
+
+            saveBtn.disabled = true;
+            saveStatus.textContent = 'Saving...';
+            saveStatus.style.color = '#2271b1';
+
+            const currentContent = getEditorContent();
+
+            const formData = new FormData();
+            formData.append('action', 'ft_save_manual_translation');
+            formData.append('nonce', nonce);
+            formData.append('post_id', postId);
+            formData.append('lang', selectedLang);
+            formData.append('title', inputTitle.value);
+            formData.append('excerpt', inputExcerpt.value);
+            formData.append('content', currentContent);
+
+            fetch(ajaxUrl, { method: 'POST', body: formData })
+                .then(res => res.json())
+                .then(res => {
+                    saveBtn.disabled = false;
+                    if (res.success) {
+                        saveStatus.textContent = '✅ Saved successfully!';
+                        saveStatus.style.color = '#27ae60';
+                        setTimeout(() => { saveStatus.textContent = ''; }, 3000);
+                    } else {
+                        saveStatus.textContent = '❌ Error saving.';
+                        saveStatus.style.color = '#d63638';
+                    }
+                })
+                .catch(err => {
+                    saveBtn.disabled = false;
+                    saveStatus.textContent = '❌ Network error.';
+                    saveStatus.style.color = '#d63638';
+                });
+        });
+    });
+    </script>
+    <?php
+}
+
+/**
+ * AJAX Handler: Retrieve existing translation strings from the database
+ */
+add_action('wp_ajax_ft_get_manual_translation', function() {
+    check_ajax_referer('ft_manual_editor_nonce', 'nonce');
+    
+    $post_id = intval($_POST['post_id']);
+    $lang = sanitize_text_field($_POST['lang']);
+
+    // Reconstruct the exact hashes used by the translation engine
+    $t_hash = md5("post_{$post_id}_the_title_{$lang}") . '_the_title';
+    $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
+    $e_hash = md5("post_{$post_id}_the_excerpt_{$lang}") . '_the_excerpt';
+
+    // Retrieve data from DB (returns false if missing/expired)
+    $title   = ft_get_cache($t_hash);
+    $content = ft_get_cache($c_hash);
+    $excerpt = ft_get_cache($e_hash);
+
+    wp_send_json_success([
+        'title'   => $title !== false ? $title : '',
+        'content' => $content !== false ? $content : '',
+        'excerpt' => $excerpt !== false ? $excerpt : ''
+    ]);
+});
+
+/**
+ * AJAX Handler: Save edited translation strings back to the database
+ */
+add_action('wp_ajax_ft_save_manual_translation', function() {
+    check_ajax_referer('ft_manual_editor_nonce', 'nonce');
+    
+    $post_id = intval($_POST['post_id']);
+    
+    // Security check: ensure user has permission to edit this post
+    if (!current_user_can('edit_post', $post_id)) {
+        wp_send_json_error('Permission denied');
+    }
+
+    $lang    = sanitize_text_field($_POST['lang']);
+    // wp_unslash is required because WordPress automatically adds slashes to $_POST
+    $title   = wp_unslash($_POST['title']);
+    $content = wp_unslash($_POST['content']);
+    $excerpt = wp_unslash($_POST['excerpt']);
+
+    // Reconstruct the exact hashes
+    $t_hash = md5("post_{$post_id}_the_title_{$lang}") . '_the_title';
+    $c_hash = md5("post_{$post_id}_the_content_{$lang}") . '_the_content';
+    $e_hash = md5("post_{$post_id}_the_excerpt_{$lang}") . '_the_excerpt';
+
+    // Calculate dynamic TTL based on plugin settings or post meta
+    $ttl_days    = freedomtranslate_get_ttl_days($post_id);
+    $ttl_seconds = $ttl_days > 0 ? (DAY_IN_SECONDS * $ttl_days) : 0; // 0 = permanent cache
+
+    // Inject manual edits directly into custom DB, forcing status to 'completed'
+    ft_set_cache($t_hash, $title, $post_id, $lang, $ttl_seconds, 'completed');
+    ft_set_cache($c_hash, $content, $post_id, $lang, $ttl_seconds, 'completed');
+    ft_set_cache($e_hash, $excerpt, $post_id, $lang, $ttl_seconds, 'completed');
+
+    wp_send_json_success();
 });
 
 // ========================================================================
