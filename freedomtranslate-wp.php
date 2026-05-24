@@ -2934,7 +2934,10 @@ add_action('add_meta_boxes', function() {
             'freedomtranslate_manual_editor_html',
             $type,
             'normal', // Render below the main editor
-            'high'
+            'high',
+            array(
+                '__block_editor_compatible_meta_box' => true
+            )
         );
     }
 });
@@ -3202,11 +3205,9 @@ add_action('add_meta_boxes', function() {
 });
 
 function freedomtranslate_exclude_metabox_html($post) {
-    // Recupero valori esistenti
     $exclude_val = get_post_meta($post->ID, '_freedomtranslate_exclude', true);
     $inject_val  = get_post_meta($post->ID, '_freedomtranslate_inject_selector', true);
     
-    // Aggiunta del nonce per sicurezza
     wp_nonce_field('ft_meta_save_action', 'ft_meta_nonce_field');
     ?>
     <p>
@@ -3225,27 +3226,3 @@ function freedomtranslate_exclude_metabox_html($post) {
     </p>
     <?php
 }
-
-// FUNZIONE DI SALVATAGGIO (DA AGGIUNGERE SE MANCANTE)
-add_action('save_post', function($post_id) {
-    // 1. Verifica nonce per sicurezza
-    if (!isset($_POST['ft_meta_nonce_field']) || !wp_verify_nonce($_POST['ft_meta_nonce_field'], 'ft_meta_save_action')) {
-        return;
-    }
-    // 2. Verifica permessi
-    if (!current_user_can('edit_post', $post_id)) {
-        return;
-    }
-    // 3. Salva "Exclude"
-    if (isset($_POST['ft_exclude_post'])) {
-        update_post_meta($post_id, '_freedomtranslate_exclude', '1');
-    } else {
-        delete_post_meta($post_id, '_freedomtranslate_exclude');
-    }
-    // 4. Salva "Inject Selector"
-    if (isset($_POST['ft_inject_selector'])) {
-        update_post_meta($post_id, '_freedomtranslate_inject_selector', '1');
-    } else {
-        delete_post_meta($post_id, '_freedomtranslate_inject_selector');
-    }
-});
