@@ -3208,7 +3208,7 @@ function freedomtranslate_exclude_metabox_html($post) {
     $exclude_val = get_post_meta($post->ID, '_freedomtranslate_exclude', true);
     $inject_val  = get_post_meta($post->ID, '_freedomtranslate_inject_selector', true);
     
-    wp_nonce_field('ft_meta_save_action', 'ft_meta_nonce_field');
+    wp_nonce_field('ft_meta_save', 'ft_meta_nonce');
     ?>
     <p>
         <label>
