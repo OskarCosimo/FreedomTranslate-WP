@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.0.4
+Version: 2.0.5
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -3193,15 +3193,21 @@ add_action('add_meta_boxes', function() {
             'freedomtranslate_exclude_metabox_html',
             $type,
             'side',
-            'default'
+            'default',
+            array(
+                '__block_editor_compatible_meta_box' => true
+            )
         );
     }
 });
 
 function freedomtranslate_exclude_metabox_html($post) {
+    // Recupero valori esistenti
     $exclude_val = get_post_meta($post->ID, '_freedomtranslate_exclude', true);
     $inject_val  = get_post_meta($post->ID, '_freedomtranslate_inject_selector', true);
-    wp_nonce_field('ft_meta_save', 'ft_meta_nonce');
+    
+    // Aggiunta del nonce per sicurezza
+    wp_nonce_field('ft_meta_save_action', 'ft_meta_nonce_field');
     ?>
     <p>
         <label>
@@ -3217,6 +3223,29 @@ function freedomtranslate_exclude_metabox_html($post) {
             <strong>Show language selector</strong>
         </label>
     </p>
-    <p class="description">Show the language selector at the top of this post/page.</p>
     <?php
 }
+
+// FUNZIONE DI SALVATAGGIO (DA AGGIUNGERE SE MANCANTE)
+add_action('save_post', function($post_id) {
+    // 1. Verifica nonce per sicurezza
+    if (!isset($_POST['ft_meta_nonce_field']) || !wp_verify_nonce($_POST['ft_meta_nonce_field'], 'ft_meta_save_action')) {
+        return;
+    }
+    // 2. Verifica permessi
+    if (!current_user_can('edit_post', $post_id)) {
+        return;
+    }
+    // 3. Salva "Exclude"
+    if (isset($_POST['ft_exclude_post'])) {
+        update_post_meta($post_id, '_freedomtranslate_exclude', '1');
+    } else {
+        delete_post_meta($post_id, '_freedomtranslate_exclude');
+    }
+    // 4. Salva "Inject Selector"
+    if (isset($_POST['ft_inject_selector'])) {
+        update_post_meta($post_id, '_freedomtranslate_inject_selector', '1');
+    } else {
+        delete_post_meta($post_id, '_freedomtranslate_inject_selector');
+    }
+});
