@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.0.5
+Version: 2.0.6
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -29,6 +29,7 @@ define('FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION',      'freedomtranslate_max_conc
 define('FREEDOMTRANSLATE_PREWARM_OPTION',             'freedomtranslate_prewarm_on_save');
 define('FREEDOMTRANSLATE_CHUNK_SIZE_OPTION',          'freedomtranslate_chunk_size');
 define('FREEDOMTRANSLATE_STRICT_MANUAL_OPTION',       'freedomtranslate_strict_manual');
+define('FREEDOMTRANSLATE_NUM_CTX_OPTION', 'freedomtranslate_num_ctx');
 
 /**
  * Send a cancellation request
@@ -393,27 +394,46 @@ function freedomtranslate_translate_google_official($text, $source, $target, $fo
     return isset($json['data']['translations']['translatedText']) ? $json['data']['translations']['translatedText'] : new WP_Error('api_error', 'Missing translatedText');
 }
 
-function freedomtranslate_translate_libre( $text, $source, $target, $format = 'text', $job_id = '' ) {
-    $api_url   = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
-    $api_key   = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
-
+function freedomtranslate_translate_libre($text, $source, $target, $format = 'text', $job_id = '') {
+    $api_url  = get_option(FREEDOMTRANSLATE_API_URL_OPTION, FREEDOMTRANSLATE_API_URL_DEFAULT);
+    $api_key  = get_option(FREEDOMTRANSLATE_API_KEY_OPTION, '');
     $timeout = (int) get_option('freedomtranslate_api_timeout', 120);
 
-    $body = ['q'=>$text,'source'=>$source,'target'=>$target,'format'=>$format];
-    if (!empty( $job_id)) {
+    $body = [
+        'q'      => $text,
+        'source' => $source,
+        'target' => $target,
+        'format' => $format
+    ];
+
+    if (!empty($job_id)) {
         $body['job_id'] = $job_id;
     }
+
     if (!empty($api_key)) {
         $body['api_key'] = $api_key;
     }
-    
-    $response = wp_remote_post($api_url, ['body'=>$body,'timeout'=>$timeout]);
-    
-    // RETURN REAL ERROR INSTEAD OF SILENT FALLBACK
-    if (is_wp_error($response)) return $response;
-    
+
+    $num_ctx = (int) get_option(FREEDOMTRANSLATE_NUM_CTX_OPTION, 4096);
+    if ($num_ctx > 0) {
+        $body['options'] = [
+            'num_ctx' => $num_ctx
+        ];
+    }
+
+    // Send payload as JSON so the nested 'options' array is parsed correctly by the API
+    $response = wp_remote_post($api_url, [
+        'headers' => [ 'Content-Type' => 'application/json' ],
+        'body'    => json_encode($body),
+        'timeout' => $timeout
+    ]);
+
+    if (is_wp_error($response)) {
+        return $response;
+    }
+
     $json = json_decode(wp_remote_retrieve_body($response), true);
-    return isset($json['translatedText']) ? $json['translatedText'] : new WP_Error('api_error', 'Missing translatedText');
+    return isset($json['translatedText']) ? $json['translatedText'] : new WP_Error('apierror', 'Missing translatedText');
 }
 
 function freedomtranslate_protect_excluded_words_in_html($html, $excluded_words) {
@@ -543,11 +563,9 @@ function freedomtranslate_string_worker($string_id, $text, $site_lang, $target_l
         $translated = freedomtranslate_translate_libre($text, $site_lang, $target_lang, 'text');
     }
 
-    if (is_wp_error($translated_chunk)) {
-            // Write 'timeout' status to DB and abort worker immediately
-            ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'timeout', $total_chunks);
-            return; 
-        }
+    if (is_wp_error($translated)) {
+        return; 
+    }
 
     if ($translated !== $text && !empty(trim($translated))) {
         
@@ -1657,6 +1675,12 @@ function freedomtranslate_settings_page() {
         $api_timeout = max(30, min(1800, absint(wp_unslash($_POST['freedomtranslate_api_timeout']))));
         update_option('freedomtranslate_api_timeout', $api_timeout);
 
+        $num_ctx = 4096;
+    if (isset($_POST['freedomtranslate_num_ctx'])) {
+    $num_ctx = max(512, min(131072, absint(wp_unslash($_POST['freedomtranslate_num_ctx']))));
+    }
+        update_option(FREEDOMTRANSLATE_NUM_CTX_OPTION, $num_ctx);
+
         if (isset($_POST['freedomtranslate_bot_signatures'])) {
             $bots = array_filter(array_map('trim', preg_split('/\R/', sanitize_textarea_field(wp_unslash($_POST['freedomtranslate_bot_signatures'])))));
             update_option(FREEDOMTRANSLATE_BOT_SIGNATURES_OPTION, $bots);
@@ -1822,6 +1846,7 @@ function freedomtranslate_settings_page() {
     $global_ttl        = get_option(FREEDOMTRANSLATE_CACHE_TTL_OPTION, 30);
     $libre_mode        = get_option(FREEDOMTRANSLATE_LIBRE_MODE_OPTION, 'async');
     $max_concurrent    = get_option(FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION, 2);
+    $num_ctx = (int) get_option(FREEDOMTRANSLATE_NUM_CTX_OPTION, 4096);
     $static_strings    = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
     $active_tab        = isset($_GET['tab']) ? sanitize_text_field($_GET['tab']) : 'general';
     ?>
@@ -1969,6 +1994,28 @@ function freedomtranslate_settings_page() {
                                 <p class="description">Maximum time WordPress will wait for the AI to reply before giving up on a chunk. For local servers (Ollama) translating large chunks, increase this to <strong>300 (5 minutes)</strong> or even <strong>600 (10 minutes)</strong> to prevent skipped/missing translations. Max: 1800 (30 min).</p>
                             </td>
                         </tr>
+                        <tr>
+    <th scope="row">
+        <label for="freedomtranslate_num_ctx">AI num_ctx</label>
+    </th>
+    <td>
+        <input
+            type="number"
+            id="freedomtranslate_num_ctx"
+            name="freedomtranslate_num_ctx"
+            value="<?php echo esc_attr($num_ctx); ?>"
+            min="512"
+            max="131072"
+            step="256"
+            style="width: 100px;"
+        />
+        <p class="description">
+            Limits the context used by the Ollama model for each translation request.
+If empty or not configured, the default of <strong>4096</strong> is used.
+Useful for preventing models from using huge contexts unnecessarily.
+        </p>
+    </td>
+</tr>
                     </table>
                 </div>
                 
