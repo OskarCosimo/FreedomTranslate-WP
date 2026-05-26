@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.0.6
+Version: 2.1.0
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -552,7 +552,11 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text', $
 add_action('freedomtranslate_async_string_translate', 'freedomtranslate_string_worker', 10, 5);
 
 function freedomtranslate_string_worker($string_id, $text, $site_lang, $target_lang, $rand = 0) {
-    if (get_transient('ft_kill_switch')) return;
+    // Record when this specific worker process started
+    $worker_start_time = time();
+    
+    // Check if a panic event occurred AFTER this worker started
+    if (get_option('ft_last_panic_time', 0) > $worker_start_time) return;
     if (empty($string_id) || empty($target_lang)) return;
 
     $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
@@ -614,8 +618,11 @@ function freedomtranslate_string_worker($string_id, $text, $site_lang, $target_l
 }
 
 function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_id) {
-    // Check if the panic button was pressed
-    if (get_transient('ft_kill_switch')) return;
+    // Record when this specific worker process started
+    $worker_start_time = time();
+    
+    // Abort immediately if a panic event occurred recently
+    if (get_option('ft_last_panic_time', 0) > $worker_start_time) return;
 
     set_time_limit(0);
     ignore_user_abort(true);
@@ -702,9 +709,9 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     $api_timeout = (int) get_option('freedomtranslate_api_timeout', 120);
     $max_execution_time = $api_timeout + 10;
 
-    while ($done_chunks < $total_chunks) {
-        // Double check kill switch or pause signal during heavy loops
-        if (get_transient('ft_kill_switch') || get_transient('ft_pause_' . $hash_key)) { 
+   while ($done_chunks < $total_chunks) {
+        // Double check panic timestamp or pause signal during heavy loops
+        if (get_option('ft_last_panic_time', 0) > $worker_start_time || get_transient('ft_pause_' . $hash_key)) {
             if (get_transient('ft_pause_' . $hash_key)) {
                 delete_transient('ft_pause_' . $hash_key);
                 ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'paused', $total_chunks);
@@ -1095,6 +1102,7 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                                     ' . esc_html($label) . '
                                 </span>
                               </div>';
+                              $html .= '<div id="ft_type_label_' . $safe_id . '" style="font-size: 11px; color: #666; text-align: center; margin-top: 4px; font-style: italic;"></div>';
                 }
                 return $html;
             case 'action':
@@ -1404,7 +1412,9 @@ function freedomtranslate_settings_page() {
             if ($post) {
                 $site_lang = substr(get_locale(), 0, 2);
                 $queued_count = 0;
-                $delay = 0;
+                
+                // Start with a 5-second delay to avoid immediate trigger during page load
+                $delay = 5; 
 
                 global $wpdb;
                 $table = $wpdb->prefix . 'freedomtranslate_cache';
@@ -1419,7 +1429,8 @@ function freedomtranslate_settings_page() {
                     
                     if (!empty($post->post_title)) {
                         ft_update_progress($t_hash, $post_id, $lang, 0, 'pending');
-                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id]);
+                        // Added uniqid('', true) to bypass WP duplicate cron prevention
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$t_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
                         $delay += 5; 
                         $queued_count++;
                     }
@@ -1430,7 +1441,7 @@ function freedomtranslate_settings_page() {
                     
                     if (!empty($post->post_content)) {
                         ft_update_progress($c_hash, $post_id, $lang, 0, 'pending');
-                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id]);
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$c_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
                         $delay += 45;
                         $queued_count++;
                     }
@@ -1441,7 +1452,7 @@ function freedomtranslate_settings_page() {
                     
                     if (!empty($post->post_excerpt)) {
                         ft_update_progress($e_hash, $post_id, $lang, 0, 'pending');
-                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$e_hash, $site_lang, $lang, $post_id]);
+                        wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_translate', [$e_hash, $site_lang, $lang, $post_id, uniqid('', true)]);
                         $delay += 15;
                         $queued_count++;
                     }
@@ -1744,7 +1755,8 @@ function freedomtranslate_settings_page() {
     
     if (!current_user_can('manage_options')) wp_die('You do not have the permission');
 
-    set_transient('ft_kill_switch', '1', 120);
+    // Save the exact timestamp of the panic event
+    update_option('ft_last_panic_time', time());
 
     $crons = _get_cron_array();
     $found = false;
@@ -2310,7 +2322,7 @@ document.addEventListener("DOMContentLoaded", function() {
             else if (btn.classList.contains('ft-ajax-cancel')) action = 'ft_queue_cancel';
             else if (btn.classList.contains('ft-ajax-pause')) action = 'ft_queue_pause';
 
-            if (action === 'ft_queue_cancel' && !confirm('Sei sicuro di voler cancellare questa traduzione? I dati verranno distrutti.')) return;
+            if (action === 'ft_queue_cancel' && !confirm('Are you sure you want to delete this translation? The data will be destroyed.')) return;
 
             btn.disabled = true;
             btn.textContent = '...';
@@ -2481,6 +2493,10 @@ document.addEventListener("DOMContentLoaded", function() {
                                 barFill.style.width = visual_width + '%';
                                 barText.textContent = label;
                                 barText.style.color = (visual_width > 50 || isSlow) ? '#fff' : '#000';
+                            }
+                            var typeLabel = document.getElementById('ft_type_label_' + safe_id);
+                            if (typeLabel && job.type) {
+                                typeLabel.textContent = 'Translating: ' + job.type + ' ✍️';
                             }
                         }
                     });
@@ -2668,9 +2684,43 @@ wp_schedule_event(time(), 'ft_five_minutes', 'freedomtranslate_queue_watchdog');
 });
 
 add_action('freedomtranslate_queue_watchdog', function() {
-global $wpdb;
-$table = $wpdb->prefix . 'freedomtranslate_cache';
+    global $wpdb;
+    $table = $wpdb->prefix . 'freedomtranslate_cache';
 
+    $api_timeout_setting = (int) get_option('freedomtranslate_api_timeout', 120);
+    $timeout_seconds = $api_timeout_setting > 0 ? ($api_timeout_setting + 30) : 600; 
+    
+    $active_jobs = $wpdb->get_results("SELECT hash_key, progress FROM $table WHERE status = 'processing'");
+    $current_time = time();
+    
+    foreach ($active_jobs as $job) {
+        $transient_key = 'ft_watchdog_tracker_' . md5($job->hash_key);
+        $tracker = get_transient($transient_key);
+        
+        if ($tracker === false || (int)$tracker['progress'] !== (int)$job->progress) {
+
+            $new_tracker = [
+                'progress'  => (int)$job->progress,
+                'timestamp' => $current_time
+            ];
+
+            set_transient($transient_key, $new_tracker, 14400); 
+            
+        } else {
+            $time_elapsed = $current_time - (int)$tracker['timestamp'];
+            
+            if ($time_elapsed >= $timeout_seconds) {
+                // Il processo è ufficialmente uno "Zombie". Lo forziamo in timeout.
+                $wpdb->update(
+                    $table, 
+                    ['status' => 'timeout'], 
+                    ['hash_key' => $job->hash_key]
+                );
+                
+                delete_transient($transient_key);
+            }
+        }
+    }
 });
 // ==========================================
 
@@ -2743,17 +2793,27 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
         $is_string = (strpos($job->hash_key, 'string_job_') === 0);
         $group_key = $is_string ? $job->hash_key : 'group_' . $job->post_id . '_' . $job->target_lang;
         $safe_id = md5($group_key);
+
+        $content_type = 'Body Content';
+        if (strpos($job->hash_key, '_the_title') !== false) $content_type = 'Title';
+        elseif (strpos($job->hash_key, '_the_excerpt') !== false) $content_type = 'Excerpt';
+        elseif ($is_string) $content_type = 'Static String';
         
         if (!isset($unified[$safe_id])) {
             $unified[$safe_id] = [
                 's' => $job->status,
                 'p' => (int)$job->progress,
-                't' => (int)$job->total_chunks
+                't' => (int)$job->total_chunks,
+                'type' => $content_type
             ];
         } else {
             $unified[$safe_id]['p'] += (int)$job->progress;
             $unified[$safe_id]['t'] += (int)$job->total_chunks;
-            if ($job->status === 'processing') $unified[$safe_id]['s'] = 'processing';
+
+            if ($job->status === 'processing') {
+                $unified[$safe_id]['s'] = 'processing';
+                $unified[$safe_id]['type'] = $content_type;
+            }
         }
     }
 
