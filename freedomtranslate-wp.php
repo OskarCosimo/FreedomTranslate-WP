@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.1.0
+Version: 2.1.1
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -415,11 +415,15 @@ function freedomtranslate_translate_libre($text, $source, $target, $format = 'te
     }
 
     $num_ctx = (int) get_option(FREEDOMTRANSLATE_NUM_CTX_OPTION, 4096);
-    if ($num_ctx > 0) {
-        $body['options'] = [
-            'num_ctx' => $num_ctx
-        ];
-    }
+    
+    $chars_per_chunk = (int) get_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, 500); 
+
+    $dynamic_kill_switch = $chars_per_chunk + 1000;
+
+    $body['options'] = [
+        'num_ctx'     => $num_ctx > 0 ? $num_ctx : 4096,
+        'num_predict' => $dynamic_kill_switch
+    ];
 
     // Send payload as JSON so the nested 'options' array is parsed correctly by the API
     $response = wp_remote_post($api_url, [
