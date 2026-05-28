@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.1.2
+Version: 2.1.3
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -356,12 +356,21 @@ add_shortcode('ft_string', function($atts) {
 
 function freedomtranslate_protect_shortcodes($html) {
     $placeholders = [];
+    
+    // Find all shortcode tags (opening, self-closing, and closing tags)
     if (preg_match_all('/\[\/?(?:[a-zA-Z0-9_-]+)(?:\s+[^\]]+)?\]/s', $html, $matches)) {
         $count = 0;
         foreach ($matches[0] as $match) {
-            $ph = '<ftshortcode id="' . $count . '"></ftshortcode>';
+            // Generate a unique, LLM-safe alphanumeric token
+            $ph = '__FTSC_' . $count . '__';
+            
+            // Wrap the token in a standard non-translatable HTML span to force API compliance
+            $wrapped_ph = '<span translate="no" class="notranslate">' . $ph . '</span>';
+            
             $placeholders[$ph] = $match;
-            $html = preg_replace('/' . preg_quote($match, '/') . '/', $ph, $html, 1);
+            
+            // Replace just one instance at a time to prevent corrupting identical shortcodes
+            $html = preg_replace('/' . preg_quote($match, '/') . '/', $wrapped_ph, $html, 1);
             $count++;
         }
     }
@@ -370,7 +379,16 @@ function freedomtranslate_protect_shortcodes($html) {
 
 function freedomtranslate_restore_shortcodes($html, $placeholders) {
     foreach ($placeholders as $ph => $original) {
-        $html = str_replace($ph, $original, $html);
+        // Regex to match the span wrapper and token, tolerating any injected whitespaces from LLMs
+        $pattern = '/<span[^>]*translate="no"[^>]*>\s*' . preg_quote($ph, '/') . '\s*<\/span>/i';
+        
+        // Attempt to replace the entire span first to keep the DOM clean
+        if (preg_match($pattern, $html)) {
+            $html = preg_replace($pattern, $original, $html);
+        } else {
+            // Fallback: if the LLM or API stripped the HTML span entirely, replace the raw token
+            $html = str_replace($ph, $original, $html);
+        }
     }
     return $html;
 }
@@ -2924,8 +2942,10 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
     
     foreach ($db_jobs as $job) {
         $is_string = (strpos($job->hash_key, 'string_job_') === 0);
-        $group_key = $is_string ? $job->hash_key : 'group_' . $job->post_id . '_' . $job->target_lang;
-        $safe_id = md5($group_key);
+        
+        // IL FIX È QUI: Usiamo direttamente l'hash_key univoco per generare l'ID,
+        // esattamente come fa l'HTML della tabella.
+        $safe_id = md5($job->hash_key);
 
         $content_type = 'Body Content';
         if (strpos($job->hash_key, '_the_title') !== false) $content_type = 'Title';
@@ -2957,10 +2977,12 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
             // Check for delayed post translations
             if (isset($cron_hooks['freedomtranslate_async_translate'])) {
                 foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                    $post_id = isset($event['args'][3]) ? $event['args'][3] : 'Unknown';
-                    $lang = isset($event['args'][2]) ? $event['args'][2] : 'Unknown';
-                    $group_key = 'group_' . $post_id . '_' . $lang;
-                    $safe_id = md5($group_key);
+                    
+                    // IL FIX È QUI: Prendiamo l'hash_key esatto direttamente dagli argomenti del cron
+                    $hash_key = isset($event['args'][0]) ? $event['args'][0] : '';
+                    if (empty($hash_key)) continue;
+
+                    $safe_id = md5($hash_key);
 
                     if (!isset($unified[$safe_id])) {
                         $unified[$safe_id] = ['s' => 'pending', 'p' => 0, 't' => 0];
