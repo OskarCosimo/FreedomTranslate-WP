@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.1.3
+Version: 2.1.4
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -30,6 +30,7 @@ define('FREEDOMTRANSLATE_PREWARM_OPTION',             'freedomtranslate_prewarm_
 define('FREEDOMTRANSLATE_CHUNK_SIZE_OPTION',          'freedomtranslate_chunk_size');
 define('FREEDOMTRANSLATE_STRICT_MANUAL_OPTION',       'freedomtranslate_strict_manual');
 define('FREEDOMTRANSLATE_NUM_CTX_OPTION', 'freedomtranslate_num_ctx');
+define('FREEDOMTRANSLATE_SEO_PERMALINKS_OPTION',       'freedomtranslate_seo_permalinks');
 
 /**
  * Send a cancellation request
@@ -171,14 +172,184 @@ function freedomtranslate_is_bot() {
 // 2. CORE & ROUTING LOGIC
 // ========================================================================
 
+/**
+ * Helper function to cleanly inject the language code as a prefix into the URL path.
+ * Handles root installations and subdirectory setups dynamically.
+ */
+function freedomtranslate_inject_lang_prefix($url, $lang) {
+    $parsed = wp_parse_url($url);
+    
+    $scheme = isset($parsed['scheme']) ? $parsed['scheme'] . '://' : '';
+    $host   = isset($parsed['host']) ? $parsed['host'] : '';
+    $port   = isset($parsed['port']) ? ':' . $parsed['port'] : '';
+    $path   = isset($parsed['path']) ? $parsed['path'] : '';
+    $query  = isset($parsed['query']) ? '?' . $parsed['query'] : '';
+    
+    // Detect if WordPress runs inside a subdirectory
+    $site_path = wp_parse_url(home_url(), PHP_URL_PATH);
+    $site_path = $site_path ? rtrim($site_path, '/') : '';
+    
+    if ($site_path && strpos($path, $site_path) === 0) {
+        $relative_path = substr($path, strlen($site_path));
+        $new_path = $site_path . '/' . $lang . '/' . ltrim($relative_path, '/');
+    } else {
+        $new_path = '/' . $lang . '/' . ltrim($path, '/');
+    }
+    
+    // Clean up potentially stacked duplicate slashes
+    $new_path = preg_replace('#/{2,}#', '/', $new_path);
+    
+    return $scheme . $host . $port . $new_path . $query;
+}
+
+// Rewrites post and page permalinks to prepend the language code
 add_filter('the_permalink', function($url) {
     $lang = freedomtranslate_get_user_lang();
     $site_lang = substr(get_locale(), 0, 2);
+    
     if ($lang !== $site_lang) {
-        $url = add_query_arg('freedomtranslate_lang', $lang, $url);
+        if (get_option('freedomtranslate_seo_permalinks', '0') === '1' && get_option('permalink_structure')) {
+            return freedomtranslate_inject_lang_prefix($url, $lang);
+        } else {
+            $url = add_query_arg('freedomtranslate_lang', $lang, $url);
+        }
     }
     return $url;
 });
+
+/**
+ * Intercept prefix-based multilingual URLs early on plugins_loaded.
+ * Rewrites the internal request structure seamlessly before WordPress executes core query parsing.
+ */
+add_action('plugins_loaded', 'freedomtranslate_internal_url_rewrite', 1);
+
+function freedomtranslate_internal_url_rewrite() {
+    if (is_admin() || empty($_SERVER['REQUEST_URI'])) return;
+    if (get_option('freedomtranslate_seo_permalinks', '0') !== '1') return;
+
+    $request_uri = $_SERVER['REQUEST_URI'];
+    $parsed_url  = wp_parse_url($request_uri);
+    $path        = isset($parsed_url['path']) ? $parsed_url['path'] : '';
+
+    $site_path = wp_parse_url(home_url(), PHP_URL_PATH);
+    $site_path = $site_path ? rtrim($site_path, '/') : '';
+
+    $relative_path = $path;
+    if ($site_path && strpos($path, $site_path) === 0) {
+        $relative_path = substr($path, strlen($site_path));
+    }
+
+    $pattern = '#^/([a-z]{2})(?:/|$)#i';
+
+    if (preg_match($pattern, $relative_path, $matches)) {
+        $lang_code = strtolower($matches[1]);
+        $enabled_langs = get_option('freedomtranslate_languages', []);
+
+        if (in_array($lang_code, $enabled_langs, true)) {
+            // Flag that we successfully intercepted a pretty URL prefix
+            if (!defined('FT_IS_PRETTY_URL')) {
+                define('FT_IS_PRETTY_URL', $lang_code);
+            }
+
+            // Only inject the language state if the user isn't actively forcing a language change via the dropdown form
+            if (!isset($_GET['freedomtranslate_lang'])) {
+                $_GET['freedomtranslate_lang']     = $lang_code;
+                $_REQUEST['freedomtranslate_lang'] = $lang_code;
+            }
+
+            // Strip the language folder from the internal request so WP can route properly
+            $remaining_path = substr($relative_path, strlen('/' . $lang_code));
+            $new_relative_path = '/' . ltrim($remaining_path, '/');
+            $new_path = $site_path . $new_relative_path;
+
+            $new_uri = $new_path;
+            if (isset($parsed_url['query'])) {
+                $new_uri .= '?' . $parsed_url['query'];
+            }
+
+            $_SERVER['REQUEST_URI'] = $new_uri;
+        }
+    }
+}
+
+/**
+ * Automatically redirect users visiting default URLs to their chosen cookie language.
+ * Protects against infinite loops by verifying internal state flags and true base locale.
+ */
+add_action('template_redirect', 'freedomtranslate_seo_language_redirect');
+
+function freedomtranslate_seo_language_redirect() {
+    // Prevent execution in core backend areas, REST endpoints, and background jobs
+    if (is_admin() || wp_doing_ajax() || wp_doing_cron() || (defined('REST_REQUEST') && REST_REQUEST)) {
+        return;
+    }
+
+    // Abort if the advanced SEO permalink architecture is disabled
+    if (get_option('freedomtranslate_seo_permalinks', '0') !== '1') {
+        return;
+    }
+
+    // FIX: Retrieve the true base language directly from the database option.
+    // Using get_locale() here is dangerous because the 'wp_loaded' hook 
+    // (freedomtranslate_force_active_locale) might have already dynamically switched it!
+    $site_source_lang = substr(get_option('WPLANG', 'en'), 0, 2);
+    if (empty($site_source_lang)) {
+        $site_source_lang = 'en';
+    }
+    
+    // SCENARIO 1: The user is explicitly switching language or clicking an old query-based link
+    if (isset($_GET['freedomtranslate_lang'])) {
+        $explicit_lang = sanitize_text_field($_GET['freedomtranslate_lang']);
+        
+        // If the URL is already SEO-friendly and matches the requested language, abort redirect
+        if (defined('FT_IS_PRETTY_URL') && FT_IS_PRETTY_URL === $explicit_lang) {
+            return;
+        }
+        
+        // Clean the query string to force the URL into the strict SEO architecture
+        $request_uri = $_SERVER['REQUEST_URI'];
+        $request_uri = remove_query_arg('freedomtranslate_lang', $request_uri);
+        
+        $is_https = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+        $scheme   = $is_https ? 'https://' : 'http://';
+        $host     = $_SERVER['HTTP_HOST'];
+        $clean_base_url = $scheme . $host . $request_uri;
+        
+        // If returning to the default site language, we drop the prefix entirely
+        if ($explicit_lang === $site_source_lang) {
+            $redirect_url = $clean_base_url;
+        } else {
+            $redirect_url = freedomtranslate_inject_lang_prefix($clean_base_url, $explicit_lang);
+        }
+        
+        header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+        wp_redirect($redirect_url, 302);
+        exit;
+    }
+
+    // SCENARIO 2: The user is browsing a root/default URL natively. Evaluate context (Cookie/Browser).
+    $target_lang = freedomtranslate_get_user_lang();
+    
+    // If the detected language matches the true native site language, leave them on the root
+    if ($target_lang === $site_source_lang) {
+        return;
+    }
+    
+    // Otherwise, inject the language subdirectory prefix and redirect
+    $request_uri = $_SERVER['REQUEST_URI'];
+    $is_https    = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+    $scheme      = $is_https ? 'https://' : 'http://';
+    $host        = $_SERVER['HTTP_HOST'];
+    $current_url = $scheme . $host . $request_uri;
+    
+    $redirect_url = freedomtranslate_inject_lang_prefix($current_url, $target_lang);
+    
+    if ($redirect_url !== $current_url) {
+        header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+        wp_redirect($redirect_url, 302);
+        exit;
+    }
+}
 
 function freedomtranslate_get_user_lang() {
     if (isset($_GET['freedomtranslate_lang'])) {
@@ -1865,11 +2036,16 @@ function freedomtranslate_settings_page() {
     }
 
     if (isset($_POST['freedomtranslate_save_languages'])) {
-        check_admin_referer('freedomtranslate_save_languages', 'freedomtranslate_nonce_languages');
-        $languages = isset($_POST['freedomtranslate_languages']) ? array_map('sanitize_text_field', wp_unslash($_POST['freedomtranslate_languages'])) : [];
-        update_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, $languages);
-        echo '<div class="notice notice-success"><p>Enabled languages saved.</p></div>';
-    }
+    check_admin_referer('freedomtranslate_save_languages', 'freedomtranslate_nonce_languages');
+    $languages = isset($_POST['freedomtranslate_languages']) ? array_map('sanitize_text_field', wp_unslash($_POST['freedomtranslate_languages'])) : [];
+    update_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, $languages);
+    
+    // Save the newly added SEO permalinks toggle state
+    $seo_permalinks = isset($_POST['freedomtranslate_seo_permalinks']) ? '1' : '0';
+    update_option('freedomtranslate_seo_permalinks', $seo_permalinks);
+    
+    echo '<div class="notice notice-success"><p>Enabled languages and permalink settings saved.</p></div>';
+}
 
     if (isset($_POST['freedomtranslate_purge_single'])) {
         check_admin_referer('freedomtranslate_purge_single', 'freedomtranslate_nonce_single');
@@ -2253,7 +2429,26 @@ function freedomtranslate_settings_page() {
                         </label>
                     <?php endforeach; ?>
                 </div>
-                <p class="submit"><input type="submit" name="freedomtranslate_save_languages" class="button button-primary" value="Save Languages"></p>
+
+                <hr style="margin: 30px 0 20px 0; border: 0; border-top: 1px solid #ccc;">
+                <h3>Advanced URL Structure</h3>
+                <table class="form-table" style="margin-bottom: 20px;">
+                    <tr valign="top">
+                        <th scope="row" style="width: 200px; padding-left: 0;">Permalink Mode</th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="freedomtranslate_seo_permalinks" value="1" <?php checked(get_option('freedomtranslate_seo_permalinks', '0'), '1'); ?>>
+                                <strong>Enable SEO-Friendly Subdirectory Structure</strong> (e.g., <code>example.com/my-post/it/</code>)
+                            </label>
+                            <p class="description" style="margin-top: 5px;">
+                                If disabled, the plugin will default to standard queries (<code>example.com/my-post/?freedomtranslate_lang=it</code>). <br>
+                                <em>Note: This configuration maps URLs completely on-the-fly and guarantees full support for browser-side hash anchors (e.g., <code>#goto</code>).</em>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+
+                <p class="submit"><input type="submit" name="freedomtranslate_save_languages" class="button button-primary" value="Save Languages & Structure Settings"></p>
             </form>
 
         <?php elseif ($active_tab === 'static_strings'): ?>
@@ -2704,15 +2899,14 @@ formData.append('nonce', btn.getAttribute('data-nonce'));
     <?php
 }
 
-//
-// FT CRON CLEANUP
-//
+// FT CRON CLEANUP & COOKIE HANDLER
 add_action('init', function() {
-
+    // Safely set the language cookie without breaking if COOKIE_DOMAIN is missing
     if (isset($_GET['freedomtranslate_lang'])) {
         $lang = sanitize_text_field(wp_unslash($_GET['freedomtranslate_lang']));
         if (freedomtranslate_is_language_enabled($lang)) {
-            setcookie('freedomtranslate_lang', $lang, time() + (DAY_IN_SECONDS * 30), '/', COOKIE_DOMAIN, is_ssl(), false);
+            $domain = defined('COOKIE_DOMAIN') ? COOKIE_DOMAIN : '';
+            setcookie('freedomtranslate_lang', $lang, time() + (DAY_IN_SECONDS * 30), '/', $domain, is_ssl(), false);
             $_COOKIE['freedomtranslate_lang'] = $lang;
         }
     }
