@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.1.4
+Version: 2.1.5
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -31,6 +31,15 @@ define('FREEDOMTRANSLATE_CHUNK_SIZE_OPTION',          'freedomtranslate_chunk_si
 define('FREEDOMTRANSLATE_STRICT_MANUAL_OPTION',       'freedomtranslate_strict_manual');
 define('FREEDOMTRANSLATE_NUM_CTX_OPTION', 'freedomtranslate_num_ctx');
 define('FREEDOMTRANSLATE_SEO_PERMALINKS_OPTION',       'freedomtranslate_seo_permalinks');
+
+/**
+ * Enqueue jQuery UI Sortable for the languages priority drag & drop
+ */
+add_action('admin_enqueue_scripts', function($hook) {
+    if (isset($_GET['page']) && $_GET['page'] === 'freedomtranslate') {
+        wp_enqueue_script('jquery-ui-sortable');
+    }
+});
 
 /**
  * Send a cancellation request
@@ -1240,7 +1249,7 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
     public function get_columns() {
         return [
             'post_id' => 'Post Info',
-            'langs'   => 'Cached Languages',
+            'langs'   => 'Cached Content Breakdown',
             'action'  => 'Action'
         ];
     }
@@ -1258,7 +1267,20 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
                 $title_html = !empty($item['title']) ? esc_html($item['title']) : '(No Title)';
                 return '<strong>ID: ' . esc_html($item['post_id']) . '</strong><br>' . $title_html . ' <a href="' . $edit_link . '" target="_blank">(Edit)</a>';
             case 'langs':
-                return '<strong>' . esc_html(strtoupper(implode(', ', $item['langs']))) . '</strong>';
+                // Generate beautiful UI badges for completed parts
+                $html = '<div style="display:flex; flex-wrap:wrap; gap:10px;">';
+                foreach ($item['langs'] as $lang => $types) {
+                    $html .= '<div style="background:#f1f1f1; border:1px solid #ccc; border-radius:4px; padding:6px; min-width: 100px;">';
+                    $html .= '<strong style="display:block; margin-bottom:5px; text-align:center; font-size:13px;">' . esc_html(strtoupper($lang)) . '</strong>';
+                    $html .= '<div style="display:flex; gap:4px; flex-wrap:wrap; justify-content:center;">';
+                    foreach ($types as $t) {
+                        $badge_color = ($t === 'TITLE') ? '#0073aa' : (($t === 'EXCERPT') ? '#e67e22' : '#46b450');
+                        $html .= '<span style="background: '.$badge_color.'; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight:bold;">' . $t . '</span>';
+                    }
+                    $html .= '</div></div>';
+                }
+                $html .= '</div>';
+                return $html;
             case 'action':
                 $base_url = 'options-general.php?page=freedomtranslate&tab=tools';
                 $delete_url = wp_nonce_url(admin_url($base_url . '&ft_action=delete_cache&post_id=' . $item['post_id']), 'ft_del_cache_' . $item['post_id']);
@@ -1277,28 +1299,36 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
         global $wpdb;
         $table = $wpdb->prefix . 'freedomtranslate_cache';
         
-        // RECUPERA SOLO I COMPLETATI
-        $db_jobs = $wpdb->get_results("SELECT post_id, target_lang FROM $table WHERE status = 'completed'");
+        // Fetch ALL hash keys to determine exactly WHICH parts are completed
+        $db_jobs = $wpdb->get_results("SELECT hash_key, post_id, target_lang FROM $table WHERE status = 'completed'");
         $unified_data = [];
 
         foreach ($db_jobs as $job) {
             if (empty($job->post_id)) continue;
+            
+            // Determine the specific type of content that was completed
+            $content_type = 'BODY';
+            if (strpos($job->hash_key, '_the_title') !== false) $content_type = 'TITLE';
+            elseif (strpos($job->hash_key, '_the_excerpt') !== false) $content_type = 'EXCERPT';
 
             if (!isset($unified_data[$job->post_id])) {
                 $unified_data[$job->post_id] = [
                     'post_id' => $job->post_id,
                     'title'   => get_the_title($job->post_id),
-                    'langs'   => [$job->target_lang]
+                    'langs'   => [ $job->target_lang => [$content_type] ]
                 ];
             } else {
-                if (!in_array($job->target_lang, $unified_data[$job->post_id]['langs'])) {
-                    $unified_data[$job->post_id]['langs'][] = $job->target_lang;
+                if (!isset($unified_data[$job->post_id]['langs'][$job->target_lang])) {
+                    $unified_data[$job->post_id]['langs'][$job->target_lang] = [$content_type];
+                } elseif (!in_array($content_type, $unified_data[$job->post_id]['langs'][$job->target_lang])) {
+                    $unified_data[$job->post_id]['langs'][$job->target_lang][] = $content_type;
                 }
             }
         }
 
         $data = array_values($unified_data);
 
+        // [...] (Mantieni il resto della funzione prepare_items originale per search, sort e pagination)
         $search_query = isset($_REQUEST['s']) ? sanitize_text_field(wp_unslash($_REQUEST['s'])) : '';
         if (!empty($search_query)) {
             $data = array_filter($data, function($item) use ($search_query) {
@@ -1390,29 +1420,41 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
                                     ' . esc_html($label) . '
                                 </span>
                               </div>';
-                              $html .= '<div id="ft_type_label_' . $safe_id . '" style="font-size: 11px; color: #666; text-align: center; margin-top: 4px; font-style: italic;"></div>';
+                              
+                    // Determine content type for initial render badge
+                    $content_type = 'BODY';
+                    if (strpos($item['hash_key'], '_the_title') !== false) $content_type = 'TITLE';
+                    elseif (strpos($item['hash_key'], '_the_excerpt') !== false) $content_type = 'EXCERPT';
+                    $badge_color = ($content_type === 'TITLE') ? '#0073aa' : (($content_type === 'EXCERPT') ? '#e67e22' : '#46b450');
+
+                    $html .= '<div id="ft_type_label_' . $safe_id . '" style="text-align: center; margin-top: 6px;">';
+                    $html .= '<span style="background: '.$badge_color.'; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-style: normal; font-weight: bold; display: inline-block;">' . $content_type . '</span>';
+                    $html .= '</div>';
                 }
                 return $html;
             case 'action':
+                // Fast String Job indicator
                 if ($is_string) return '<span style="color:#888;">(Fast String Job)</span>';
                 
                 $nonce_val = wp_create_nonce('ft_queue_action');
                 $html = '<div style="display: flex; gap: 8px; align-items: center;">';
                 
+                // Inject data-hash attribute correctly for the JS handler
                 if (in_array($item['status'], ['pending', 'timeout', 'paused'])) {
                     $btn_text = in_array($item['status'], ['timeout', 'paused']) ? 'Resume Job' : 'Start Now';
-                    $html .= '<button class="button button-small button-primary ft-ajax-start" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">' . $btn_text . '</button>';
+                    $html .= '<button class="button button-small button-primary ft-ajax-start" data-hash="' . esc_attr($item['hash_key']) . '" data-nonce="' . esc_attr($nonce_val) . '">' . $btn_text . '</button>';
                 }
+                
+                // Pause button with data-hash
                 if (in_array($item['status'], ['pending', 'processing'])) {
-                    $html .= '<button class="button button-small ft-ajax-pause" style="margin-left: 4px;" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">Pause</button>';
+                    $html .= '<button class="button button-small ft-ajax-pause" style="margin-left: 4px;" data-hash="' . esc_attr($item['hash_key']) . '" data-nonce="' . esc_attr($nonce_val) . '">Pause</button>';
                 }
 
-                $html .= '<button class="button button-small ft-ajax-cancel" style="color: #d63638; border-color: #d63638; margin-left: 4px;" data-post="' . esc_attr($item['post_id']) . '" data-lang="' . esc_attr($item['lang']) . '" data-nonce="' . esc_attr($nonce_val) . '">Cancel</button>';
+                // Delete button with data-hash
+                $html .= '<button class="button button-small ft-ajax-cancel" style="color: #d63638; border-color: #d63638; margin-left: 4px;" data-hash="' . esc_attr($item['hash_key']) . '" data-nonce="' . esc_attr($nonce_val) . '">Cancel</button>';
                 $html .= '</div>';
                 
                 return $html;
-            default:
-                return '';
         }
     }
 
@@ -1812,7 +1854,7 @@ function freedomtranslate_settings_page() {
             
             $job = $wpdb->get_row($wpdb->prepare("SELECT post_id, target_lang FROM $table WHERE hash_key = %s", $hash_key));
             if ($job) {
-                $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $hash_key]);
+                $wpdb->update($table, ['status' => 'pending'], ['hash_key' => $hash_key]);
                 $site_lang = substr(get_locale(), 0, 2);
                 $args = [$hash_key, $site_lang, $job->target_lang, (int)$job->post_id, uniqid('', true)]; 
                 wp_clear_scheduled_hook('freedomtranslate_async_translate', $args);
@@ -1855,9 +1897,9 @@ function freedomtranslate_settings_page() {
             $lang = sanitize_text_field($_GET['lang']);
             check_admin_referer('ft_group_' . $p_id . '_' . $lang);
             
-            $job = $wpdb->get_row($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status = 'pending' LIMIT 1", $p_id, $lang));
+            $job = $wpdb->get_row($wpdb->prepare("SELECT hash_key FROM $table WHERE post_id = %d AND target_lang = %s AND status IN ('pending', 'timeout', 'paused') LIMIT 1", $p_id, $lang));
             if ($job) {
-                $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $job->hash_key]);
+                $wpdb->update($table, ['status' => 'pending'], ['hash_key' => $job->hash_key]);
                 $site_lang = substr(get_locale(), 0, 2);
                 $args = [$job->hash_key, $site_lang, $lang, $p_id, uniqid('', true)]; 
                 wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
@@ -2420,15 +2462,52 @@ function freedomtranslate_settings_page() {
             
             <form method="post">
                 <?php wp_nonce_field('freedomtranslate_save_languages', 'freedomtranslate_nonce_languages'); ?>
-                <h3>Enable Languages</h3>
-                <div style="column-count:3;margin-top:15px; margin-bottom:20px;">
-                    <?php foreach ($all_languages as $code => $label): ?>
-                        <label style="display:block;margin-bottom:5px;">
-                            <input type="checkbox" name="freedomtranslate_languages[]" value="<?php echo esc_attr($code); ?>" <?php checked(in_array($code, $enabled_languages, true)); ?>>
-                            <?php echo esc_html($label); ?>
-                        </label>
-                    <?php endforeach; ?>
-                </div>
+                <h3>Enable Languages & Set Priority</h3>
+                <p class="description" style="margin-bottom: 15px;"><strong>Drag and drop</strong> the items below to set the priority order for background translations. Top languages will be translated first.</p>
+                
+                <ul id="ft-lang-sortable" style="list-style-type: none; margin: 0; padding: 0; max-width: 600px;">
+                    <?php 
+                    // 1. Output enabled languages first (in their currently saved order)
+                    foreach ($enabled_languages as $code) {
+                        if (isset($all_languages[$code])) {
+                            echo '<li style="background:#fff; border:1px solid #ccc; padding:10px 15px; margin-bottom:8px; border-radius:4px; cursor:grab; display:flex; align-items:center;">
+                                    <span style="color:#aaa; margin-right:15px; cursor:grab;">☰</span>
+                                    <label style="cursor:pointer; flex-grow:1;">
+                                        <input type="checkbox" name="freedomtranslate_languages[]" value="'.esc_attr($code).'" checked>
+                                        <strong style="margin-left:8px;">'.esc_html(strtoupper($code)).'</strong> - '.esc_html($all_languages[$code]).'
+                                    </label>
+                                  </li>';
+                        }
+                    }
+                    
+                    // 2. Output disabled languages at the bottom
+                    foreach ($all_languages as $code => $label) {
+                        if (!in_array($code, $enabled_languages, true)) {
+                            echo '<li style="background:#f9f9f9; border:1px dashed #ccc; padding:10px 15px; margin-bottom:8px; border-radius:4px; cursor:grab; opacity:0.6; display:flex; align-items:center;">
+                                    <span style="color:#ddd; margin-right:15px; cursor:grab;">☰</span>
+                                    <label style="cursor:pointer; flex-grow:1;">
+                                        <input type="checkbox" name="freedomtranslate_languages[]" value="'.esc_attr($code).'">
+                                        <strong style="margin-left:8px;">'.esc_html(strtoupper($code)).'</strong> - '.esc_html($label).'
+                                    </label>
+                                  </li>';
+                        }
+                    }
+                    ?>
+                </ul>
+
+                <script>
+                    // Initialize drag-and-drop sortable interface
+                    jQuery(document).ready(function($) {
+                        $('#ft-lang-sortable').sortable({
+                            cursor: 'grabbing',
+                            opacity: 0.8,
+                            update: function(event, ui) {
+                                // The new DOM order naturally dictates the POST array order
+                            }
+                        });
+                        $('#ft-lang-sortable').disableSelection();
+                    });
+                </script>
 
                 <hr style="margin: 30px 0 20px 0; border: 0; border-top: 1px solid #ccc;">
                 <h3>Advanced URL Structure</h3>
@@ -2842,7 +2921,10 @@ formData.append('nonce', btn.getAttribute('data-nonce'));
                             }
                             var typeLabel = document.getElementById('ft_type_label_' + safe_id);
                             if (typeLabel && job.type) {
-                                typeLabel.textContent = 'Translating: ' + job.type + ' ✍️';
+                                var badgeColor = '#46b450';
+                                if(job.type.toUpperCase() === 'TITLE') badgeColor = '#0073aa';
+                                if(job.type.toUpperCase() === 'EXCERPT') badgeColor = '#e67e22';
+                                typeLabel.innerHTML = '<span style="background: ' + badgeColor + '; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-style: normal; font-weight: bold; display: inline-block;">' + job.type.toUpperCase() + '</span>';
                             }
                         }
                     });
@@ -3213,7 +3295,7 @@ add_action('wp_ajax_ft_queue_start', function() {
 
     $job = $wpdb->get_row($wpdb->prepare("SELECT post_id, target_lang FROM $table WHERE hash_key = %s AND status IN ('pending', 'timeout', 'paused') LIMIT 1", $hash_key));
     if ($job) {
-        $wpdb->update($table, ['status' => 'processing'], ['hash_key' => $hash_key]);
+        $wpdb->update($table, ['status' => 'pending'], ['hash_key' => $hash_key]);
         $site_lang = substr(get_locale(), 0, 2);
         wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$hash_key, $site_lang, $job->target_lang, $job->post_id, uniqid('', true)]);
     }
