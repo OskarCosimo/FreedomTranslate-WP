@@ -1246,8 +1246,10 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
         ]);
     }
 
+    // Define columns including the checkbox header
     public function get_columns() {
         return [
+            'cb'      => '<input type="checkbox" />',
             'post_id' => 'Post Info',
             'langs'   => 'Cached Content Breakdown',
             'action'  => 'Action'
@@ -1257,6 +1259,21 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
     public function get_sortable_columns() {
         return [
             'post_id' => ['post_id', true]
+        ];
+    }
+
+    // Render the checkbox input for each row
+    public function column_cb($item) {
+        return sprintf(
+            '<input type="checkbox" name="bulk_post_ids[]" value="%s" />', 
+            esc_attr($item['post_id'])
+        );
+    }
+
+    // Register bulk actions
+    public function get_bulk_actions() {
+        return [
+            'bulk_delete_cache' => 'Clear Cache'
         ];
     }
 
@@ -1359,8 +1376,11 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
         ]);
     }
 
+    
+    // Define columns including the checkbox header
     public function get_columns() {
         return [
+            'cb'        => '<input type="checkbox" />',
             'post_id'   => 'Target Post',
             'lang'      => 'Language',
             'status'    => 'Status & Progress',
@@ -1369,12 +1389,29 @@ class FreedomTranslate_Queue_Table extends WP_List_Table {
         ];
     }
 
+    // Render the checkbox input for each row
+    public function column_cb($item) {
+        return sprintf(
+            '<input type="checkbox" name="bulk_hash_keys[]" value="%s" />', 
+            esc_attr($item['hash_key'])
+        );
+    }
+
     public function get_sortable_columns() {
         return [
             'post_id'   => ['post_id', false],
             'lang'      => ['lang', false],
             'status'    => ['status', false],
             'scheduled' => ['scheduled', false]
+        ];
+    }
+
+    // Register bulk actions
+    public function get_bulk_actions() {
+        return [
+            'bulk_resume' => 'Start / Resume Jobs',
+            'bulk_pause'  => 'Pause Jobs',
+            'bulk_cancel' => 'Cancel Jobs'
         ];
     }
 
@@ -1563,16 +1600,26 @@ class FreedomTranslate_Strings_Table extends WP_List_Table {
         ]);
     }
 
+    // Define columns specifically for static strings data structure
     public function get_columns() {
         return [
-            'id'           => 'ID',
-            'original'     => 'Original Text',
-            'translations' => 'Translations',
-            'shortcode'    => 'Shortcode',
-            'action'       => 'Action'
+            'cb'               => '<input type="checkbox" />',
+            'id'               => 'String ID',
+            'original'         => 'Original Text',
+            'translated_langs' => 'Translations',
+            'action'           => 'Action'
         ];
     }
 
+    // Render the checkbox input for each string row
+    public function column_cb($item) {
+        return sprintf(
+            '<input type="checkbox" name="bulk_string_ids[]" value="%s" />', 
+            esc_attr($item['id'])
+        );
+    }
+
+    // Define sortable columns
     public function get_sortable_columns() {
         return [
             'id'       => ['id', false],
@@ -1580,68 +1627,42 @@ class FreedomTranslate_Strings_Table extends WP_List_Table {
         ];
     }
 
+    // Register bulk actions for strings
+    public function get_bulk_actions() {
+        return [
+            'bulk_retranslate_strings' => 'Retranslate Selected',
+            'bulk_delete_strings'      => 'Delete Selected'
+        ];
+    }
+
+    // Render the table cells with the correct data keys
     public function column_default($item, $column_name) {
-        $safe_id = md5($item['hash_key']);
-        $is_string = strpos($item['hash_key'], 'string_job_') === 0;
-
-        $content_type = 'BODY';
-        if (strpos($item['hash_key'], '_the_title') !== false) $content_type = 'TITLE';
-        elseif (strpos($item['hash_key'], '_the_excerpt') !== false) $content_type = 'EXCERPT';
-
         switch ($column_name) {
-            case 'post_id':
-                if ($item['post_id'] === 'Unknown' || $is_string) return '<strong>' . esc_html($item['post_id']) . '</strong>';
-                $badge_color = ($content_type === 'TITLE') ? '#0073aa' : (($content_type === 'EXCERPT') ? '#e67e22' : '#46b450');
-                $type_badge = '<span style="background: '.$badge_color.'; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; margin-left: 5px;">' . $content_type . '</span>';
-                return '<strong>' . esc_html($item['post_id']) . '</strong> ' . $type_badge . '<br><a href="' . get_edit_post_link($item['post_id']) . '" target="_blank" style="font-size: 11px;">(Edit)</a>';
-            case 'lang':
-                return '<strong>' . esc_html(strtoupper($item['lang'])) . '</strong>';
-            case 'scheduled':
-                if ($item['status'] === 'processing') return '<strong style="color:#27ae60;">Currently Executing ⚙️</strong>';
-                if ($item['scheduled'] === 0) return '<span style="color:#d63638; font-weight:bold;">Missing Cron</span>';
-                $time_diff = $item['scheduled'] - time();
-                if ($time_diff <= 0) return '<strong style="color:#2271b1;">Queued</strong>';
-                return 'In ' . human_time_diff(time(), $item['scheduled']);
-            case 'status':
-                $bg_color = ($item['status'] === 'pending') ? '#f0b849' : (($item['status'] === 'processing') ? '#2271b1' : '#72777c');
-                $status_label = strtoupper($item['status']);
-                if ($item['status'] === 'cron_only') $status_label = 'ZOMBIE CRON';
+            case 'id':
+                return '<strong>' . esc_html($item['id']) . '</strong>';
                 
-                $html = '<div style="margin-bottom: 5px;" id="ft_status_wrap_' . $safe_id . '"><span id="ft_status_badge_' . $safe_id . '" style="background: ' . $bg_color . '; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">' . esc_html($status_label) . '</span></div>';
+            case 'original':
+                return esc_html($item['original']);
                 
-                if (in_array($item['status'], ['pending', 'processing', 'timeout'])) {
-                    $percent = 0; $visual_width = 5;
-                    $label = 'Chunk: ' . $item['progress'] . ' / ? (Waiting...)';
-                    if (isset($item['total_chunks']) && $item['total_chunks'] > 0) {
-                        $percent = round(($item['progress'] / $item['total_chunks']) * 100);
-                        $visual_width = max(5, $percent);
-                        $label = 'Chunk: ' . $item['progress'] . ' / ' . $item['total_chunks'] . ' (' . $percent . '%)';
-                    }
-                    $text_color = $visual_width > 50 ? '#fff' : '#000';
-                    $html .= '<div style="background: #e1e1e1; width: 100%; height: 20px; border-radius: 10px; overflow: hidden; position: relative;">
-                                <div id="ft_bar_fill_' . $safe_id . '" style="background: #27ae60; width: ' . esc_attr($visual_width) . '%; height: 100%; transition: width 0.5s;"></div>
-                                <span id="ft_bar_text_' . $safe_id . '" style="position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; color: ' . $text_color . '; line-height: 20px; white-space: nowrap;">' . esc_html($label) . '</span>
-                              </div>';
+            case 'translated_langs':
+                if (empty($item['translated_langs'])) {
+                    return '<span style="color:#d63638; font-weight:bold;">No translations yet</span>';
                 }
-                return $html;
+                
+                $badges = '';
+                foreach ($item['translated_langs'] as $l) {
+                    $badges .= '<span style="background:#46b450; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px; margin-right:4px;">' . strtoupper($l) . '</span>';
+                }
+                return $badges . '<br><small style="color:#666; margin-top:4px; display:inline-block;">' . $item['done_count'] . ' / ' . $item['expected_count'] . ' languages completed</small>';
+                
             case 'action':
-                if ($is_string) return '<span style="color:#888;">(Fast String Job)</span>';
+                $base_url = 'options-general.php?page=freedomtranslate&tab=static_strings';
+                $retranslate_url = wp_nonce_url(admin_url($base_url . '&ft_action=retranslate_string&string_id=' . $item['id']), 'ft_ret_string_' . $item['id']);
+                $delete_url      = wp_nonce_url(admin_url($base_url . '&ft_action=delete_string&string_id=' . $item['id']), 'ft_del_string_' . $item['id']);
                 
-                $nonce_val = wp_create_nonce('ft_queue_action');
-                $html = '<div style="display: flex; gap: 8px; align-items: center;">';
-
-                if (in_array($item['status'], ['pending', 'timeout', 'paused'])) {
-                    $btn_text = in_array($item['status'], ['timeout', 'paused']) ? 'Resume Job' : 'Start Now';
-                    $html .= '<button class="button button-small button-primary ft-ajax-start" data-hash="' . esc_attr($item['hash_key']) . '" data-nonce="' . esc_attr($nonce_val) . '">' . $btn_text . '</button>';
-                }
-                if (in_array($item['status'], ['pending', 'processing'])) {
-                    $html .= '<button class="button button-small ft-ajax-pause" style="margin-left: 4px;" data-hash="' . esc_attr($item['hash_key']) . '" data-nonce="' . esc_attr($nonce_val) . '">Pause</button>';
-                }
-
-                $html .= '<button class="button button-small ft-ajax-cancel" style="color: #d63638; border-color: #d63638; margin-left: 4px;" data-hash="' . esc_attr($item['hash_key']) . '" data-nonce="' . esc_attr($nonce_val) . '">Cancel</button>';
-                $html .= '</div>';
-                
-                return $html;
+                return '<a href="' . esc_url($retranslate_url) . '" class="button button-small" style="margin-right:5px;">Retranslate</a>' . 
+                       '<a href="' . esc_url($delete_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Delete this string permanently?\');">Delete</a>';
+                       
             default:
                 return '';
         }
@@ -1990,6 +2011,130 @@ function freedomtranslate_settings_page() {
             }
             echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'deleted_string', $clean_url)) . '";</script>';
             exit;
+        }
+    }
+
+    // --- BULK ACTIONS HANDLER ---
+    $bulk_action = isset($_REQUEST['action']) && $_REQUEST['action'] !== '-1' ? sanitize_text_field($_REQUEST['action']) : (isset($_REQUEST['action2']) && $_REQUEST['action2'] !== '-1' ? sanitize_text_field($_REQUEST['action2']) : '');
+
+    if (!empty($bulk_action)) {
+        // Registry Table: Delete Cache
+        if ($bulk_action === 'bulk_delete_cache' && !empty($_REQUEST['bulk_post_ids'])) {
+            $post_ids = array_map('intval', $_REQUEST['bulk_post_ids']);
+            foreach ($post_ids as $p_id) {
+                if ($p_id > 0) $wpdb->delete($table, ['post_id' => $p_id]);
+            }
+            echo '<div class="notice notice-success is-dismissible"><p>Bulk cache cleared successfully.</p></div>';
+        }
+        // Queue Table: Cancel Jobs
+        elseif ($bulk_action === 'bulk_cancel' && !empty($_REQUEST['bulk_hash_keys'])) {
+            $hashes = array_map('sanitize_text_field', wp_unslash($_REQUEST['bulk_hash_keys']));
+            ft_cancel_remote_job($hashes);
+            foreach ($hashes as $h) {
+                $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $h . '_chunk_%'));
+                $wpdb->delete($table, ['hash_key' => $h]);
+            }
+            
+            // Clean up crons
+            $crons = _get_cron_array();
+            if (is_array($crons)) {
+                $changed = false;
+                foreach ($crons as $timestamp => $cron_hooks) {
+                    if (isset($cron_hooks['freedomtranslate_async_translate'])) {
+                        foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
+                            if (isset($event['args'][0]) && in_array($event['args'][0], $hashes)) {
+                                unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
+                                $changed = true;
+                            }
+                        }
+                    }
+                }
+                if ($changed) update_option('cron', $crons);
+            }
+            echo '<div class="notice notice-success is-dismissible"><p>Bulk jobs cancelled and removed.</p></div>';
+        }
+        // Queue Table: Pause Jobs
+        elseif ($bulk_action === 'bulk_pause' && !empty($_REQUEST['bulk_hash_keys'])) {
+            $hashes = array_map('sanitize_text_field', wp_unslash($_REQUEST['bulk_hash_keys']));
+            foreach ($hashes as $h) {
+                set_transient('ft_pause_' . $h, '1', 600);
+                $wpdb->update($table, ['status' => 'paused'], ['hash_key' => $h]);
+            }
+            
+            // Remove paused jobs from cron
+            $crons = _get_cron_array();
+            if (is_array($crons)) {
+                $changed = false;
+                foreach ($crons as $timestamp => $cron_hooks) {
+                    if (isset($cron_hooks['freedomtranslate_async_translate'])) {
+                        foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
+                            if (isset($event['args'][0]) && in_array($event['args'][0], $hashes)) {
+                                unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
+                                $changed = true;
+                            }
+                        }
+                    }
+                }
+                if ($changed) update_option('cron', $crons);
+            }
+            echo '<div class="notice notice-success is-dismissible"><p>Bulk jobs paused.</p></div>';
+        }
+        // Queue Table: Resume Jobs
+        elseif ($bulk_action === 'bulk_resume' && !empty($_REQUEST['bulk_hash_keys'])) {
+            $hashes = array_map('sanitize_text_field', wp_unslash($_REQUEST['bulk_hash_keys']));
+            $site_lang = substr(get_locale(), 0, 2);
+            foreach ($hashes as $h) {
+                $job = $wpdb->get_row($wpdb->prepare("SELECT post_id, target_lang FROM $table WHERE hash_key = %s LIMIT 1", $h));
+                if ($job) {
+                    $wpdb->update($table, ['status' => 'pending'], ['hash_key' => $h]);
+                    wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [$h, $site_lang, $job->target_lang, $job->post_id, uniqid('', true)]);
+                }
+            }
+            echo '<div class="notice notice-success is-dismissible"><p>Bulk jobs resumed and queued.</p></div>';
+        }
+        // Static Strings Table: Delete Strings
+        elseif ($bulk_action === 'bulk_delete_strings' && !empty($_REQUEST['bulk_string_ids'])) {
+            $ids = array_map('sanitize_key', $_REQUEST['bulk_string_ids']);
+            $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
+            $changed = false;
+            
+            foreach ($ids as $id) {
+                if (isset($strings[$id])) {
+                    unset($strings[$id]);
+                    $changed = true;
+                }
+            }
+            if ($changed) update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
+            
+            echo '<div class="notice notice-success is-dismissible"><p>Bulk strings deleted successfully.</p></div>';
+        }
+        
+        // Static Strings Table: Retranslate Strings
+        elseif ($bulk_action === 'bulk_retranslate_strings' && !empty($_REQUEST['bulk_string_ids'])) {
+            $ids = array_map('sanitize_key', $_REQUEST['bulk_string_ids']);
+            $strings = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
+            $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
+            $site_lang = substr(get_locale(), 0, 2);
+            $delay = 0;
+            
+            foreach ($ids as $id) {
+                if (isset($strings[$id])) {
+                    $text = $strings[$id]['original'];
+                    
+                    // Queue translation for all enabled languages
+                    foreach ($enabled_langs as $lang) {
+                        if ($lang === $site_lang) continue;
+                        
+                        wp_schedule_single_event(
+                            time() + $delay, 
+                            'freedomtranslate_async_string_translate', 
+                            [$id, $text, $site_lang, $lang, uniqid('', true)]
+                        );
+                        $delay += 15; // Stagger jobs to prevent server overload
+                    }
+                }
+            }
+            echo '<div class="notice notice-success is-dismissible"><p>Bulk strings queued for retranslation.</p></div>';
         }
     }
 
@@ -2772,10 +2917,13 @@ formData.append('nonce', btn.getAttribute('data-nonce'));
 
     // Loop progress bar
     setInterval(function() {
-        if (!hasTableOnLoad) return; 
+        if (!hasTableOnLoad) return;
+
+        // Retrieve current search parameter from the URL
+        var searchParam = new URLSearchParams(window.location.search).get('s') || '';
 
         var xhr = new XMLHttpRequest();
-        xhr.open('GET', ajaxUrl + '?action=ft_queue_monitor_data&_t=' + new Date().getTime(), true);
+        xhr.open('GET', ajaxUrl + '?action=ft_queue_monitor_data&s=' + encodeURIComponent(searchParam) + '&_t=' + new Date().getTime(), true);
         xhr.onload = function() {
             if (xhr.status === 200) {
                 try {
@@ -3219,8 +3367,6 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
     foreach ($db_jobs as $job) {
         $is_string = (strpos($job->hash_key, 'string_job_') === 0);
         
-        // IL FIX È QUI: Usiamo direttamente l'hash_key univoco per generare l'ID,
-        // esattamente come fa l'HTML della tabella.
         $safe_id = md5($job->hash_key);
 
         $content_type = 'Body Content';
@@ -3230,10 +3376,12 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
         
         if (!isset($unified[$safe_id])) {
             $unified[$safe_id] = [
-                's' => $job->status,
-                'p' => (int)$job->progress,
-                't' => (int)$job->total_chunks,
-                'type' => $content_type
+                's'       => $job->status,
+                'p'       => (int)$job->progress,
+                't'       => (int)$job->total_chunks,
+                'type'    => $content_type,
+                'post_id' => $job->post_id,
+                'lang'    => $job->target_lang
             ];
         } else {
             $unified[$safe_id]['p'] += (int)$job->progress;
@@ -3254,14 +3402,19 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
             if (isset($cron_hooks['freedomtranslate_async_translate'])) {
                 foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
                     
-                    // IL FIX È QUI: Prendiamo l'hash_key esatto direttamente dagli argomenti del cron
                     $hash_key = isset($event['args'][0]) ? $event['args'][0] : '';
                     if (empty($hash_key)) continue;
 
                     $safe_id = md5($hash_key);
 
                     if (!isset($unified[$safe_id])) {
-                        $unified[$safe_id] = ['s' => 'pending', 'p' => 0, 't' => 0];
+                        $lang = isset($event['args'][2]) ? $event['args'][2] : 'Unknown';
+                        $post_id = isset($event['args'][3]) ? $event['args'][3] : 'Unknown';
+                        
+                        $unified[$safe_id] = [
+                            's' => 'pending', 'p' => 0, 't' => 0, 
+                            'post_id' => $post_id, 'lang' => $lang
+                        ];
                     }
                 }
             }
@@ -3275,12 +3428,22 @@ add_action('wp_ajax_ft_queue_monitor_data', function() {
                     $safe_id = md5($hash_key);
 
                     if (!isset($unified[$safe_id])) {
-                        $unified[$safe_id] = ['s' => 'pending', 'p' => 0, 't' => 0];
+                        $unified[$safe_id] = [
+                            's' => 'pending', 'p' => 0, 't' => 0, 
+                            'post_id' => 'String: ' . $string_id, 'lang' => $target_lang
+                        ];
                     }
                 }
             }
             
         }
+    }
+
+    $search_query = isset($_GET['s']) ? sanitize_text_field(wp_unslash($_GET['s'])) : '';
+    if (!empty($search_query)) {
+        $unified = array_filter($unified, function($item) use ($search_query) {
+            return (stripos((string)$item['post_id'], $search_query) !== false || stripos($item['lang'], $search_query) !== false);
+        });
     }
 
     wp_send_json($unified);
