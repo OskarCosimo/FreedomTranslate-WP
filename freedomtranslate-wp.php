@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.1.5
+Version: 2.1.6
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -183,7 +183,6 @@ function freedomtranslate_is_bot() {
 
 /**
  * Helper function to cleanly inject the language code as a prefix into the URL path.
- * Handles root installations and subdirectory setups dynamically.
  */
 function freedomtranslate_inject_lang_prefix($url, $lang) {
     $parsed = wp_parse_url($url);
@@ -194,7 +193,6 @@ function freedomtranslate_inject_lang_prefix($url, $lang) {
     $path   = isset($parsed['path']) ? $parsed['path'] : '';
     $query  = isset($parsed['query']) ? '?' . $parsed['query'] : '';
     
-    // Detect if WordPress runs inside a subdirectory
     $site_path = wp_parse_url(home_url(), PHP_URL_PATH);
     $site_path = $site_path ? rtrim($site_path, '/') : '';
     
@@ -205,36 +203,46 @@ function freedomtranslate_inject_lang_prefix($url, $lang) {
         $new_path = '/' . $lang . '/' . ltrim($path, '/');
     }
     
-    // Clean up potentially stacked duplicate slashes
     $new_path = preg_replace('#/{2,}#', '/', $new_path);
     
     return $scheme . $host . $port . $new_path . $query;
 }
 
-// Rewrites post and page permalinks to prepend the language code
-add_filter('the_permalink', function($url) {
-    $lang = freedomtranslate_get_user_lang();
-    $site_lang = substr(get_locale(), 0, 2);
-    
-    if ($lang !== $site_lang) {
-        if (get_option('freedomtranslate_seo_permalinks', '0') === '1' && get_option('permalink_structure')) {
-            return freedomtranslate_inject_lang_prefix($url, $lang);
-        } else {
-            $url = add_query_arg('freedomtranslate_lang', $lang, $url);
-        }
-    }
-    return $url;
-});
+// 1. UNIVERSAL LINK FILTERING (Priority 999 to override SEO plugins)
+// Ensures that ALL links (categories, tags, archives, paginations) get the language prefix
+$ft_link_filters = [
+    'the_permalink', 'post_link', 'page_link', 'post_type_archive_link', 
+    'category_link', 'tag_link', 'term_link', 'author_link', 
+    'day_link', 'month_link', 'year_link', 'search_link', 'get_pagenum_link'
+];
 
-/**
- * Intercept prefix-based multilingual URLs early on plugins_loaded.
- * Rewrites the internal request structure seamlessly before WordPress executes core query parsing.
- */
+foreach ($ft_link_filters as $filter) {
+    add_filter($filter, function($url) {
+        $lang = freedomtranslate_get_user_lang();
+        $site_lang = substr(get_locale(), 0, 2);
+        
+        if ($lang !== $site_lang) {
+            if (get_option('freedomtranslate_seo_permalinks', '0') === '1') {
+                return freedomtranslate_inject_lang_prefix($url, $lang);
+            } else {
+                return add_query_arg('freedomtranslate_lang', $lang, $url);
+            }
+        }
+        return $url;
+    }, 999);
+}
+
+// 2. INTERNAL URL REWRITE
 add_action('plugins_loaded', 'freedomtranslate_internal_url_rewrite', 1);
 
 function freedomtranslate_internal_url_rewrite() {
     if (is_admin() || empty($_SERVER['REQUEST_URI'])) return;
     if (get_option('freedomtranslate_seo_permalinks', '0') !== '1') return;
+
+    // Save the original intact URL to prevent WP routing confusion later
+    if (!defined('FT_ORIGINAL_URI')) {
+        define('FT_ORIGINAL_URI', $_SERVER['REQUEST_URI']);
+    }
 
     $request_uri = $_SERVER['REQUEST_URI'];
     $parsed_url  = wp_parse_url($request_uri);
@@ -255,18 +263,13 @@ function freedomtranslate_internal_url_rewrite() {
         $enabled_langs = get_option('freedomtranslate_languages', []);
 
         if (in_array($lang_code, $enabled_langs, true)) {
-            // Flag that we successfully intercepted a pretty URL prefix
-            if (!defined('FT_IS_PRETTY_URL')) {
-                define('FT_IS_PRETTY_URL', $lang_code);
-            }
+            if (!defined('FT_IS_PRETTY_URL')) define('FT_IS_PRETTY_URL', $lang_code);
 
-            // Only inject the language state if the user isn't actively forcing a language change via the dropdown form
             if (!isset($_GET['freedomtranslate_lang'])) {
                 $_GET['freedomtranslate_lang']     = $lang_code;
                 $_REQUEST['freedomtranslate_lang'] = $lang_code;
             }
 
-            // Strip the language folder from the internal request so WP can route properly
             $remaining_path = substr($relative_path, strlen('/' . $lang_code));
             $new_relative_path = '/' . ltrim($remaining_path, '/');
             $new_path = $site_path . $new_relative_path;
@@ -277,80 +280,89 @@ function freedomtranslate_internal_url_rewrite() {
             }
 
             $_SERVER['REQUEST_URI'] = $new_uri;
+
+            if (isset($_SERVER['PATH_INFO']))    $_SERVER['PATH_INFO']    = $new_path;
+            if (isset($_SERVER['REDIRECT_URL'])) $_SERVER['REDIRECT_URL'] = $new_path;
+            if (isset($_SERVER['SCRIPT_URL']))   $_SERVER['SCRIPT_URL']   = $new_path;
         }
     }
 }
 
-/**
- * Automatically redirect users visiting default URLs to their chosen cookie language.
- * Protects against infinite loops by verifying internal state flags and true base locale.
- */
-add_action('template_redirect', 'freedomtranslate_seo_language_redirect');
+// 3. DISABLE NATIVE & PLUGIN REDIRECTS ON TRANSLATED URLS
+// Block ghost redirects from WordPress and SEO plugins that break pagination
+add_filter('redirect_canonical', function($redirect_url, $requested_url) {
+    if (defined('FT_IS_PRETTY_URL')) return false;
+    return $redirect_url;
+}, 10, 2);
+
+add_filter('wpseo_canonical', function($canonical) {
+    if (defined('FT_IS_PRETTY_URL')) return false;
+    return $canonical;
+}, 10, 1);
+
+add_filter('rank_math/frontend/canonical', function($canonical) {
+    if (defined('FT_IS_PRETTY_URL')) return false;
+    return $canonical;
+}, 10, 1);
+
+
+// 4. SMART SEO REDIRECTOR
+add_action('template_redirect', 'freedomtranslate_seo_language_redirect', 1);
 
 function freedomtranslate_seo_language_redirect() {
-    // Prevent execution in core backend areas, REST endpoints, and background jobs
-    if (is_admin() || wp_doing_ajax() || wp_doing_cron() || (defined('REST_REQUEST') && REST_REQUEST)) {
-        return;
-    }
+    if (is_admin() || wp_doing_ajax() || wp_doing_cron() || (defined('REST_REQUEST') && REST_REQUEST)) return;
+    if (get_option('freedomtranslate_seo_permalinks', '0') !== '1') return;
 
-    // Abort if the advanced SEO permalink architecture is disabled
-    if (get_option('freedomtranslate_seo_permalinks', '0') !== '1') {
-        return;
-    }
-
-    // FIX: Retrieve the true base language directly from the database option.
-    // Using get_locale() here is dangerous because the 'wp_loaded' hook 
-    // (freedomtranslate_force_active_locale) might have already dynamically switched it!
     $site_source_lang = substr(get_option('WPLANG', 'en'), 0, 2);
-    if (empty($site_source_lang)) {
-        $site_source_lang = 'en';
-    }
+    if (empty($site_source_lang)) $site_source_lang = 'en';
     
-    // SCENARIO 1: The user is explicitly switching language or clicking an old query-based link
-    if (isset($_GET['freedomtranslate_lang'])) {
-        $explicit_lang = sanitize_text_field($_GET['freedomtranslate_lang']);
-        
-        // If the URL is already SEO-friendly and matches the requested language, abort redirect
-        if (defined('FT_IS_PRETTY_URL') && FT_IS_PRETTY_URL === $explicit_lang) {
-            return;
+    $is_https = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+    $scheme   = $is_https ? 'https://' : 'http://';
+    $host     = $_SERVER['HTTP_HOST'];
+
+    // Use the original URL to avoid infinite loops caused by internal rewrites
+    $actual_uri = defined('FT_ORIGINAL_URI') ? FT_ORIGINAL_URI : $_SERVER['REQUEST_URI'];
+
+    // Check if the user forced a language change via the dropdown widget
+    $has_explicit_query = false;
+    if (isset($_SERVER['QUERY_STRING'])) {
+        parse_str($_SERVER['QUERY_STRING'], $query_params);
+        if (isset($query_params['freedomtranslate_lang'])) {
+            $has_explicit_query = true;
+            $explicit_lang = sanitize_text_field($query_params['freedomtranslate_lang']);
         }
-        
-        // Clean the query string to force the URL into the strict SEO architecture
-        $request_uri = $_SERVER['REQUEST_URI'];
-        $request_uri = remove_query_arg('freedomtranslate_lang', $request_uri);
-        
-        $is_https = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
-        $scheme   = $is_https ? 'https://' : 'http://';
-        $host     = $_SERVER['HTTP_HOST'];
-        $clean_base_url = $scheme . $host . $request_uri;
-        
-        // If returning to the default site language, we drop the prefix entirely
+    }
+
+    if ($has_explicit_query) {
+        if (defined('FT_IS_PRETTY_URL') && FT_IS_PRETTY_URL === $explicit_lang) return;
+
+        $clean_uri = remove_query_arg('freedomtranslate_lang', $actual_uri);
+        $clean_base_url = $scheme . $host . $clean_uri;
+
         if ($explicit_lang === $site_source_lang) {
+            if (defined('FT_IS_PRETTY_URL')) {
+                $clean_base_url = preg_replace('#^' . preg_quote($scheme . $host . '/' . FT_IS_PRETTY_URL, '#') . '/#i', $scheme . $host . '/', $clean_base_url);
+            }
             $redirect_url = $clean_base_url;
         } else {
+            if (defined('FT_IS_PRETTY_URL')) {
+                $clean_base_url = preg_replace('#^' . preg_quote($scheme . $host . '/' . FT_IS_PRETTY_URL, '#') . '/#i', $scheme . $host . '/', $clean_base_url);
+            }
             $redirect_url = freedomtranslate_inject_lang_prefix($clean_base_url, $explicit_lang);
         }
-        
+
         header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
         wp_redirect($redirect_url, 302);
         exit;
     }
 
-    // SCENARIO 2: The user is browsing a root/default URL natively. Evaluate context (Cookie/Browser).
+    // If the user is ALREADY on a translated page (e.g., /it/...), abort to keep permalinks
+    if (defined('FT_IS_PRETTY_URL')) return;
+
     $target_lang = freedomtranslate_get_user_lang();
+    if ($target_lang === $site_source_lang) return;
     
-    // If the detected language matches the true native site language, leave them on the root
-    if ($target_lang === $site_source_lang) {
-        return;
-    }
-    
-    // Otherwise, inject the language subdirectory prefix and redirect
-    $request_uri = $_SERVER['REQUEST_URI'];
-    $is_https    = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
-    $scheme      = $is_https ? 'https://' : 'http://';
-    $host        = $_SERVER['HTTP_HOST'];
-    $current_url = $scheme . $host . $request_uri;
-    
+    $current_url = $scheme . $host . $actual_uri;
     $redirect_url = freedomtranslate_inject_lang_prefix($current_url, $target_lang);
     
     if ($redirect_url !== $current_url) {
@@ -360,6 +372,7 @@ function freedomtranslate_seo_language_redirect() {
     }
 }
 
+// 5. HELPER FUNCTIONS
 function freedomtranslate_get_user_lang() {
     if (isset($_GET['freedomtranslate_lang'])) {
         $lang = sanitize_text_field(wp_unslash($_GET['freedomtranslate_lang']));
@@ -399,13 +412,11 @@ function freedomtranslate_get_all_languages() {
     ];
 }
 
-// ovverride wordpress locale
+// Override WordPress Locale
 add_action('wp_loaded', 'freedomtranslate_force_active_locale');
 
 function freedomtranslate_force_active_locale() {
-    if (is_admin()) {
-        return;
-    }
+    if (is_admin()) return;
 
     $user_lang = '';
     if (isset($_GET['freedomtranslate_lang'])) {
@@ -414,9 +425,7 @@ function freedomtranslate_force_active_locale() {
         $user_lang = sanitize_text_field(wp_unslash($_COOKIE['freedomtranslate_lang']));
     }
 
-    if (empty($user_lang)) {
-        return;
-    }
+    if (empty($user_lang)) return;
 
     $locales_map = [
         'ar' => 'ar', 'az' => 'az', 'zh' => 'zh_CN', 'cs' => 'cs_CZ',
@@ -431,7 +440,6 @@ function freedomtranslate_force_active_locale() {
 
     if (isset($locales_map[$user_lang])) {
         $target_locale = $locales_map[$user_lang];
-
         if (get_locale() !== $target_locale) {
             switch_to_locale($target_locale);
         }
@@ -1031,6 +1039,24 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
             ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'timeout', $total_chunks);
             return; 
         }
+
+        // --- SAFETY DOUBLE-CHECK (POST-FLIGHT VALIDATION) ---
+        global $wpdb;
+        $table = $wpdb->prefix . 'freedomtranslate_cache';
+
+        // 1. Check if a global panic occurred WHILE we were waiting for the AI
+        if (get_option('ft_last_panic_time', 0) > $worker_start_time) {
+            // Silently kill the worker and discard the chunk
+            return; 
+        }
+
+        // 2. Check if the job was manually deleted or cleared from the UI WHILE we were waiting
+        $job_still_exists = $wpdb->get_var($wpdb->prepare("SELECT hash_key FROM $table WHERE hash_key = %s", $hash_key));
+        if (!$job_still_exists) {
+            // The record is gone. Silently abort so we don't resurrect it with a REPLACE command.
+            return; 
+        }
+        // --- END SAFETY DOUBLE-CHECK ---
         
         // Save the translated chunk temporarily
         $chunk_hash = $hash_key . '_chunk_' . $done_chunks;
@@ -1126,6 +1152,14 @@ function freedomtranslate_ajax_check_ready() {
 add_action('wp_ajax_nopriv_freedomtranslate_check_ready', 'freedomtranslate_ajax_check_ready');
 add_action('wp_ajax_freedomtranslate_check_ready',        'freedomtranslate_ajax_check_ready');
 
+// ========================================================================
+// CORE FILTERS FOR CONTENT TRANSLATION
+// ========================================================================
+add_filter('the_content',     'freedomtranslate_filter_post_content', 10, 1);
+add_filter('the_title',       'freedomtranslate_filter_post_content', 10, 2);
+add_filter('the_excerpt',     'freedomtranslate_filter_post_content', 10, 2);
+add_filter('get_the_excerpt', 'freedomtranslate_filter_post_content', 10, 2);
+
 function freedomtranslate_filter_post_content($content, $id = null) {
     if (is_admin()) return $content;
     
@@ -1142,39 +1176,106 @@ function freedomtranslate_filter_post_content($content, $id = null) {
     if (function_exists('wp_is_json_request') && wp_is_json_request()) return $content;
     if (!is_string($content) || trim($content) === '') return $content;
 
-    $current_obj_id = ($id !== null && is_numeric($id)) ? (int)$id : (int)get_the_ID();
+    // Bulletproof ID extraction to survive custom theme loops
+    global $post;
+    $current_obj_id = 0;
+    if (is_numeric($id) && $id > 0) {
+        $current_obj_id = (int)$id;
+    } elseif (is_object($id) && isset($id->ID)) {
+        $current_obj_id = (int)$id->ID;
+    } elseif (isset($post->ID)) {
+        $current_obj_id = (int)$post->ID;
+    } else {
+        $current_obj_id = (int)get_the_ID();
+    }
+    
     if (!$current_obj_id) return $content;
 
     $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
     $filter_name = current_filter();
+    
+    // Normalize custom excerpt requests
+    if ($filter_name === 'get_the_excerpt') {
+        $filter_name = 'the_excerpt';
+    }
 
     $active_hash = md5("post_{$current_obj_id}_{$filter_name}_{$user_lang}") . '_' . $filter_name;
+    $libre_mode  = get_option(FREEDOMTRANSLATE_LIBRE_MODE_OPTION, 'async');
 
-    if (get_option(FREEDOMTRANSLATE_LIBRE_MODE_OPTION) === 'async' && $service === 'libretranslate') {
+    if ($libre_mode === 'async' && in_array($service, ['libretranslate', 'ollama'])) {
         
-        // --- EXCERPT HIJACKING
+        global $wpdb;
+        $table = $wpdb->prefix . 'freedomtranslate_cache';
+        $current_ttl = (int) get_option(FREEDOMTRANSLATE_CACHE_TTL_OPTION, 0);
+        
+        // --- SMART EXCERPT HIJACKING ---
         if ($filter_name === 'the_excerpt') {
-            $content_hash = md5("post_{$current_obj_id}_the_content_{$user_lang}") . '_the_content';
-            $content_status = ft_get_status_db($content_hash);
             
-            if ($content_status && $content_status->status === 'completed') {
-                $cached_content = ft_get_cache($content_hash);
-                if ($cached_content !== false) {
-                    return wp_trim_words(strip_tags(do_shortcode($cached_content)), 55);
+            // Priority 1: Check explicit excerpt (Auto-healing query bypasses strict MD5 mismatches)
+            // FIXED: Removed 'id' from SELECT
+            $db_explicit = $wpdb->get_row($wpdb->prepare("
+                SELECT translation, expires_at, hash_key FROM $table 
+                WHERE post_id = %d AND target_lang = %s AND hash_key LIKE %s AND status = 'completed' LIMIT 1
+            ", $current_obj_id, $user_lang, '%_the_excerpt'));
+            
+            if ($db_explicit) {
+                // Self-Heal: Update old legacy hashes to the new strict algorithm using hash_key
+                if ($db_explicit->hash_key !== $active_hash) {
+                    $wpdb->update($table, ['hash_key' => $active_hash], ['hash_key' => $db_explicit->hash_key]);
+                }
+                if ($current_ttl === 0 || empty($db_explicit->expires_at) || strtotime($db_explicit->expires_at . ' UTC') > time()) {
+                    return do_shortcode($db_explicit->translation);
+                }
+            }
+
+            // Priority 2: Fallback to Body trim
+            $db_body = $wpdb->get_row($wpdb->prepare("
+                SELECT translation, expires_at FROM $table 
+                WHERE post_id = %d AND target_lang = %s AND hash_key LIKE %s AND status = 'completed' LIMIT 1
+            ", $current_obj_id, $user_lang, '%_the_content'));
+            
+            if ($db_body) {
+                if ($current_ttl === 0 || empty($db_body->expires_at) || strtotime($db_body->expires_at . ' UTC') > time()) {
+                    return wp_trim_words(strip_tags(do_shortcode($db_body->translation)), 55);
                 }
             }
         }
 
-        $status_data = ft_get_status_db($active_hash);
+        // --- STANDARD CACHE RETRIEVAL (Title & Content) ---
+        // Lookup using Lang and Type to catch old records regardless of MD5 salt
+        // FIXED: Removed 'id' from SELECT
+        $db_row = $wpdb->get_row($wpdb->prepare("
+            SELECT status, translation, expires_at, hash_key FROM $table 
+            WHERE post_id = %d AND target_lang = %s AND hash_key LIKE %s LIMIT 1
+        ", $current_obj_id, $user_lang, '%' . $wpdb->esc_like($filter_name)));
 
-        if ($status_data && $status_data->status === 'completed') {
-            $cached = ft_get_cache($active_hash);
-            if ($cached !== false) return do_shortcode($cached);
+        $cached_translation = false;
+        $is_completed = false;
+
+        if ($db_row) {
+            // Self-Heal: Update old legacy hashes using the old hash_key as reference
+            if ($db_row->hash_key !== $active_hash) {
+                $wpdb->update($table, ['hash_key' => $active_hash], ['hash_key' => $db_row->hash_key]);
+            }
+            
+            if ($db_row->status === 'completed') {
+                $is_completed = true;
+                if ($current_ttl === 0 || empty($db_row->expires_at) || strtotime($db_row->expires_at . ' UTC') > time()) {
+                    $cached_translation = $db_row->translation;
+                }
+            }
+        }
+
+        // Output instantly if cache is valid and permanent
+        if ($is_completed && $cached_translation !== false) {
+            return do_shortcode($cached_translation);
         }
 
         if (freedomtranslate_is_bot()) return $content;
 
-        if (!$status_data) {
+        // --- BACKGROUND JOB QUEUING ---
+        if (!$db_row || ($is_completed && $cached_translation === false)) {
+            
             if (get_option(FREEDOMTRANSLATE_STRICT_MANUAL_OPTION, '1') === '1') {
                 return $content; 
             }
@@ -1182,6 +1283,7 @@ function freedomtranslate_filter_post_content($content, $id = null) {
             $lock_key = 'ft_lock_' . md5($active_hash);
             if (false === get_transient($lock_key)) {
                 set_transient($lock_key, true, 60);
+                
                 ft_update_progress($active_hash, $current_obj_id, $user_lang, 0, 'pending');
                 wp_schedule_single_event(time(), 'freedomtranslate_async_translate', [
                     $active_hash, $site_source_lang, $user_lang, $current_obj_id, uniqid('', true)
@@ -1192,6 +1294,7 @@ function freedomtranslate_filter_post_content($content, $id = null) {
         return $content;
     }
 
+    // Legacy Synchronous Fallback
     return freedomtranslate_translate($content, $site_source_lang, $user_lang, 'html', $current_obj_id, $active_hash);
 }
 
