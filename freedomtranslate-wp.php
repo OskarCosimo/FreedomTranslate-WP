@@ -1388,31 +1388,44 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
         ];
     }
 
+    // Render the table cells with the correct data keys
     public function column_default($item, $column_name) {
         switch ($column_name) {
-            case 'post_id':
-                $edit_link = get_edit_post_link($item['post_id']);
-                $title_html = !empty($item['title']) ? esc_html($item['title']) : '(No Title)';
-                return '<strong>ID: ' . esc_html($item['post_id']) . '</strong><br>' . $title_html . ' <a href="' . $edit_link . '" target="_blank">(Edit)</a>';
-            case 'langs':
-                // Generate beautiful UI badges for completed parts
-                $html = '<div style="display:flex; flex-wrap:wrap; gap:10px;">';
-                foreach ($item['langs'] as $lang => $types) {
-                    $html .= '<div style="background:#f1f1f1; border:1px solid #ccc; border-radius:4px; padding:6px; min-width: 100px;">';
-                    $html .= '<strong style="display:block; margin-bottom:5px; text-align:center; font-size:13px;">' . esc_html(strtoupper($lang)) . '</strong>';
-                    $html .= '<div style="display:flex; gap:4px; flex-wrap:wrap; justify-content:center;">';
-                    foreach ($types as $t) {
-                        $badge_color = ($t === 'TITLE') ? '#0073aa' : (($t === 'EXCERPT') ? '#e67e22' : '#46b450');
-                        $html .= '<span style="background: '.$badge_color.'; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight:bold;">' . $t . '</span>';
-                    }
-                    $html .= '</div></div>';
+            case 'id':
+                // Generate the shortcode string
+                $shortcode = '[ft_string id="' . esc_attr($item['id']) . '"]';
+                
+                // Output the string ID and the corresponding shortcode in a stylized UI code block
+                return '<strong>' . esc_html($item['id']) . '</strong><br>' .
+                       '<code style="display:inline-block; margin-top:5px; font-size:11px; padding:3px 6px; background:#f0f0f1; border:1px solid #ccd0d4; border-radius:3px;">' . esc_html($shortcode) . '</code>';
+                
+            case 'original':
+                // Return the unescaped original text
+                return esc_html($item['original']);
+                
+            case 'translated_langs':
+                // Display a warning if no translations exist
+                if (empty($item['translated_langs'])) {
+                    return '<span style="color:#d63638; font-weight:bold;">No translations yet</span>';
                 }
-                $html .= '</div>';
-                return $html;
+                
+                // Build and append the language badges for completed translations
+                $badges = '';
+                foreach ($item['translated_langs'] as $l) {
+                    $badges .= '<span style="background:#46b450; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px; margin-right:4px;">' . strtoupper($l) . '</span>';
+                }
+                return $badges . '<br><small style="color:#666; margin-top:4px; display:inline-block;">' . $item['done_count'] . ' / ' . $item['expected_count'] . ' languages completed</small>';
+                
             case 'action':
-                $base_url = 'options-general.php?page=freedomtranslate&tab=tools';
-                $delete_url = wp_nonce_url(admin_url($base_url . '&ft_action=delete_cache&post_id=' . $item['post_id']), 'ft_del_cache_' . $item['post_id']);
-                return '<a href="' . esc_url($delete_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Sei sicuro di voler svuotare la cache per questo specifico post?\');">Clear Cache</a>';
+                // Generate action URLs for retranslation and deletion with proper nonces
+                $base_url = 'options-general.php?page=freedomtranslate&tab=static_strings';
+                $retranslate_url = wp_nonce_url(admin_url($base_url . '&ft_action=retranslate_string&string_id=' . $item['id']), 'ft_ret_string_' . $item['id']);
+                $delete_url      = wp_nonce_url(admin_url($base_url . '&ft_action=delete_string&string_id=' . $item['id']), 'ft_del_string_' . $item['id']);
+                
+                // Return the action buttons HTML
+                return '<a href="' . esc_url($retranslate_url) . '" class="button button-small" style="margin-right:5px;">Retranslate</a>' . 
+                       '<a href="' . esc_url($delete_url) . '" class="button button-small" style="color: #d63638; border-color: #d63638;" onclick="return confirm(\'Delete this string permanently?\');">Delete</a>';
+                       
             default:
                 return '';
         }
