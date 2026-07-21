@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.1.9
+Version: 2.2.0
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -664,7 +664,7 @@ function ft_clean_ollama_translation($text) {
 
 // Native Direct Integration for Ollama API
 function freedomtranslate_translate_ollama($text, $source, $target, $format = 'text', $job_id = '') {
-    $api_url    = get_option(FREEDOMTRANSLATE_API_URL_OPTION, 'http://localhost:11434/api/generate');
+    $api_url = get_option(FREEDOMTRANSLATE_API_URL_OPTION, 'http://localhost:11434/api/generate');
     
     // Auto-append the correct API endpoint if the URL only contains host and port
     if (strpos(strtolower($api_url), '/api/') === false) {
@@ -685,6 +685,10 @@ function freedomtranslate_translate_ollama($text, $source, $target, $format = 't
         'ro' => 'Romanian', 'bg' => 'Bulgarian', 'uk' => 'Ukrainian', 'ko' => 'Korean',
         'hi' => 'Hindi', 'id' => 'Indonesian', 'th' => 'Thai', 'vi' => 'Vietnamese'
     ];
+
+    // FIX: Re-declare full source and target variables for the prompt strings
+    $full_source = isset($lang_map[strtolower($source)]) ? $lang_map[strtolower($source)] : $source;
+    $full_target = isset($lang_map[strtolower($target)]) ? $lang_map[strtolower($target)] : $target;
 
     // Apply strict custom prompts based on content format
     if ($format === 'html') {
@@ -719,6 +723,7 @@ function freedomtranslate_translate_ollama($text, $source, $target, $format = 't
         ]
     ];
 
+    // Send payload as JSON so the nested 'options' array is parsed correctly by the API
     $response = wp_remote_post($api_url, [
         'headers' => [ 'Content-Type' => 'application/json' ],
         'body'    => json_encode($payload),
