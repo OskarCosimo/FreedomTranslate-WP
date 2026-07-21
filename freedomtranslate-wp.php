@@ -1789,6 +1789,21 @@ class FreedomTranslate_Strings_Table extends WP_List_Table {
         }
     }
 
+    // Dedicated column handler for the 'id' column in FreedomTranslate_Strings_Table
+    public function column_id($item) {
+        // Build the shortcode string safely
+        $shortcode = '[ft_string id="' . esc_attr($item['id']) . '"]';
+        
+        // Output the string ID and a click-to-select readonly input box to prevent shortcode execution and CSS conflicts
+        $html  = '<strong>' . esc_html($item['id']) . '</strong><br>';
+        $html .= '<input type="text" readonly value="' . esc_attr($shortcode) . '" ';
+        $html .= 'onclick="this.select();" ';
+        $html .= 'style="width: 100%; max-width: 220px; font-family: monospace; font-size: 11px; padding: 2px 6px; margin-top: 4px; background: #f6f7f7; color: #2c3338; border: 1px solid #c3c4c7; border-radius: 3px; cursor: pointer;" ';
+        $html .= 'title="Click to select all for easy copy" />';
+        
+        return $html;
+    }
+
     public function prepare_items() {
         $columns  = $this->get_columns();
         $hidden   = [];
