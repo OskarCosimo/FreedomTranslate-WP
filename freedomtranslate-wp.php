@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.2.0
+Version: 2.2.1
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -686,20 +686,24 @@ function freedomtranslate_translate_ollama($text, $source, $target, $format = 't
         'hi' => 'Hindi', 'id' => 'Indonesian', 'th' => 'Thai', 'vi' => 'Vietnamese'
     ];
 
-    // FIX: Re-declare full source and target variables for the prompt strings
+    // Re-declare full source and target variables for the prompt strings
     $full_source = isset($lang_map[strtolower($source)]) ? $lang_map[strtolower($source)] : $source;
     $full_target = isset($lang_map[strtolower($target)]) ? $lang_map[strtolower($target)] : $target;
 
-    // Apply strict custom prompts based on content format
+    // Apply strict custom prompts based on content format with Anti-Thinking constraints
     if ($format === 'html') {
-        $prompt = "You are a professional web systems translator. Translate the following HTML content from {$full_source} to {$full_target}.\n" .
+        $prompt = "/no_think\n" .
+                  "You are a direct translation engine. DO NOT THINK. DO NOT USE THINK TAGS.\n" .
+                  "Translate the following HTML content from {$full_source} to {$full_target}.\n" .
                   "CRITICAL RULES:\n" .
                   "- You MUST translate 100% of the visible text into {$full_target}.\n" .
                   "- DO NOT modify HTML tags, attributes (href, src, class, id), or entities.\n" .
-                  "- Return ONLY the translated HTML, without any thinking process or explanation.\n\n" .
+                  "- Return ONLY the translated HTML.\n\n" .
                   "HTML to translate:\n{$text}";
     } else {
-        $prompt = "You are a professional translator from {$full_source} to {$full_target}.\n" .
+        $prompt = "/no_think\n" .
+                  "You are a direct translation engine. DO NOT THINK. DO NOT USE THINK TAGS.\n" .
+                  "Translate from {$full_source} to {$full_target}.\n" .
                   "CRITICAL RULE: Provide ONLY the translated {$full_target} text. NO explanations. NO introductions.\n\n" .
                   "Text to translate:\n{$text}";
     }
@@ -714,6 +718,7 @@ function freedomtranslate_translate_ollama($text, $source, $target, $format = 't
         'prompt'     => $prompt,
         'stream'     => false,
         'raw'        => false,
+        'think'      => false, // Disables reasoning/thinking mode natively in Ollama
         'keep_alive' => $keep_alive,
         'options'    => [
             'temperature' => 0.1,
