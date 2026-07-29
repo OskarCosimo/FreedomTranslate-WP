@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.2.1
+Version: 2.2.2
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -581,6 +581,47 @@ function freedomtranslate_restore_shortcodes($html, $placeholders) {
     return $html;
 }
 
+// Protect WordPress Gutenberg block comments from being translated by the LLM
+function freedomtranslate_protect_gutenberg_blocks($html) {
+    $placeholders = [];
+    
+    // Match both opening (<!-- wp:block -->) and closing (<!-- /wp:block -->) Gutenberg comments
+    if (preg_match_all('/<!--\s*\/?wp:.*?-->/is', $html, $matches)) {
+        $count = 0;
+        foreach ($matches[0] as $match) {
+            // Generate a unique, LLM-safe token for WP blocks
+            $ph = '__FTWP_' . $count . '__';
+            
+            // Wrap in a non-translatable span to prevent LLM hallucinations
+            $wrapped_ph = '<span translate="no" class="notranslate">' . $ph . '</span>';
+            
+            $placeholders[$ph] = $match;
+            
+            // Replace exactly one instance to maintain correct sequential order
+            $html = preg_replace('/' . preg_quote($match, '/') . '/', $wrapped_ph, $html, 1);
+            $count++;
+        }
+    }
+    return [$html, $placeholders];
+}
+
+// Restore WordPress Gutenberg block comments after translation
+function freedomtranslate_restore_gutenberg_blocks($html, $placeholders) {
+    foreach ($placeholders as $ph => $original) {
+        // Regex to match the span wrapper and token, tolerating any injected whitespaces
+        $pattern = '/<span[^>]*translate="no"[^>]*>\s*' . preg_quote($ph, '/') . '\s*<\/span>/i';
+        
+        // Attempt to replace the entire span first to keep the DOM clean
+        if (preg_match($pattern, $html)) {
+            $html = preg_replace($pattern, $original, $html);
+        } else {
+            // Fallback: if the LLM stripped the HTML span entirely, replace the raw token
+            $html = str_replace($ph, $original, $html);
+        }
+    }
+    return $html;
+}
+
 function freedomtranslate_translate_google_official($text, $source, $target, $format = 'text') {
     $api_key = get_option(FREEDOMTRANSLATE_GOOGLE_API_KEY_OPTION, '');
     if (empty($api_key)) return $text;
@@ -797,11 +838,18 @@ function freedomtranslate_get_ttl_days($post_id = 0) {
 // ========================================================================
 
 function freedomtranslate_translate($text, $source, $target, $format = 'text', $post_id = 0, $custom_hash = '') {
+    // Check if required WordPress functions are available
     if (!function_exists('wp_remote_post')) return $text;
     if (trim($text) === '' || $source === $target || !freedomtranslate_is_language_enabled($target)) return $text;
 
     $sc_placeholders = [];
+    $wp_placeholders = []; // Initialize Gutenberg placeholders
+
     if ($format === 'html') {
+        // Protect Gutenberg Blocks FIRST to avoid nested parsing issues
+        list($text, $wp_placeholders) = freedomtranslate_protect_gutenberg_blocks($text);
+        
+        // Protect standard shortcodes
         list($text, $sc_placeholders) = freedomtranslate_protect_shortcodes($text);
     }
 
@@ -811,7 +859,9 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text', $
     } else {
         $placeholders = [];
         foreach ($excluded_words as $word) {
-            $word = trim($word); if ($word === '') continue;
+            $word = trim($word); 
+            if ($word === '') continue;
+            
             $placeholder = 'FTPH' . strtoupper(substr(md5($word), 0, 8)) . 'FTPH';
             $pattern     = '/(?<![a-zA-Z0-9_\-])' . preg_quote($word, '/') . '(?![a-zA-Z0-9_\-])/ui';
             $text        = preg_replace($pattern, $placeholder, $text);
@@ -819,7 +869,7 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text', $
         }
     }
 
-    $service   = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
+    $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
     
     // Hash Fallback System for Sync mode
     $legacy_hash = md5($text . $source . $target . $format . $service);
@@ -827,7 +877,7 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text', $
     
     $cached = ft_get_cache($active_hash);
     
-    // Fallback
+    // Fallback handler for legacy hashes
     if ($cached === false && $active_hash !== $legacy_hash) {
         $cached = ft_get_cache($legacy_hash);
         if ($cached !== false) {
@@ -835,28 +885,46 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text', $
         }
     }
 
+    // Return early if cache hit
     if ($cached !== false) return $cached;
 
+    // Execute translation based on selected service
     switch ($service) {
-        case 'googlehash':       $translated = $text; break;
-        case 'google_official':  $translated = freedomtranslate_translate_google_official($text, $source, $target, $format); break;
-        case 'ollama':           $translated = freedomtranslate_translate_ollama($text, $source, $target, $format); break;
+        case 'googlehash':       
+            $translated = $text; 
+            break;
+        case 'google_official':  
+            $translated = freedomtranslate_translate_google_official($text, $source, $target, $format); 
+            break;
+        case 'ollama':           
+            $translated = freedomtranslate_translate_ollama($text, $source, $target, $format); 
+            break;
         case 'libretranslate':
         default:
             $translated = freedomtranslate_translate_libre($text, $source, $target, $format);
             break;
     }
 
+    // Abort if API failed
     if (is_wp_error($translated)) return $text;
 
+    // Restore protections in reverse order
     if (!empty($placeholders)) {
         $translated = freedomtranslate_restore_excluded_words_in_html($translated, $placeholders);
     }
+    
     if (!empty($sc_placeholders)) {
         $translated = freedomtranslate_restore_shortcodes($translated, $sc_placeholders);
     }
+    
+    // Restore Gutenberg Blocks LAST
+    if (!empty($wp_placeholders)) {
+        $translated = freedomtranslate_restore_gutenberg_blocks($translated, $wp_placeholders);
+    }
 
+    // Save newly generated translation to custom cache
     ft_set_cache($active_hash, $translated, $post_id, $target, DAY_IN_SECONDS * freedomtranslate_get_ttl_days($post_id));
+    
     return $translated;
 }
 
