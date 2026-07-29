@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.2.3
+Version: 2.2.4
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -1077,7 +1077,14 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     }
 
     $chunk_size = (int) get_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, 500);
-    list($protected_text, $sc_placeholders) = freedomtranslate_protect_shortcodes($source_text);
+    
+    // 1. Protect Gutenberg blocks FIRST before any processing
+    list($protected_text, $wp_placeholders) = freedomtranslate_protect_gutenberg_blocks($source_text);
+    
+    // 2. Protect standard shortcodes
+    list($protected_text, $sc_placeholders) = freedomtranslate_protect_shortcodes($protected_text);
+    
+    // 3. Split the fully protected text into manageable chunks for the LLM
     $chunks = freedomtranslate_split_html_into_chunks($protected_text, $chunk_size);
     $total_chunks = count($chunks);
 
@@ -1157,6 +1164,14 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     for ($i = 0; $i < $total_chunks; $i++) {
         $chunk_part = ft_get_cache($hash_key . '_chunk_' . $i);
         $final_content .= ($chunk_part !== false) ? $chunk_part : '';
+    }
+
+    // Restore shortcodes
+    $final_content = freedomtranslate_restore_shortcodes($final_content, $sc_placeholders);
+    
+    // Restore Gutenberg blocks safely AFTER shortcodes
+    if (!empty($wp_placeholders)) {
+        $final_content = freedomtranslate_restore_gutenberg_blocks($final_content, $wp_placeholders);
     }
 
     // Restore shortcodes before saving
