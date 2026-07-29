@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.2.2
+Version: 2.2.3
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -581,23 +581,17 @@ function freedomtranslate_restore_shortcodes($html, $placeholders) {
     return $html;
 }
 
-// Protect WordPress Gutenberg block comments from being translated by the LLM
+// Protect WordPress Gutenberg block comments from being translated by the LLM (Enhanced Regex)
 function freedomtranslate_protect_gutenberg_blocks($html) {
     $placeholders = [];
     
-    // Match both opening (<!-- wp:block -->) and closing (<!-- /wp:block -->) Gutenberg comments
-    if (preg_match_all('/<!--\s*\/?wp:.*?-->/is', $html, $matches)) {
+    // Enhanced Regex: catches any variation of <!-- wp:... -->, <!-- /wp:... -->, or malformed tags
+    if (preg_match_all('/<!--\s*\/?\s*wp:[^>]+-->/is', $html, $matches)) {
         $count = 0;
         foreach ($matches[0] as $match) {
-            // Generate a unique, LLM-safe token for WP blocks
             $ph = '__FTWP_' . $count . '__';
-            
-            // Wrap in a non-translatable span to prevent LLM hallucinations
             $wrapped_ph = '<span translate="no" class="notranslate">' . $ph . '</span>';
-            
             $placeholders[$ph] = $match;
-            
-            // Replace exactly one instance to maintain correct sequential order
             $html = preg_replace('/' . preg_quote($match, '/') . '/', $wrapped_ph, $html, 1);
             $count++;
         }
@@ -605,20 +599,22 @@ function freedomtranslate_protect_gutenberg_blocks($html) {
     return [$html, $placeholders];
 }
 
-// Restore WordPress Gutenberg block comments after translation
+// Restore WordPress Gutenberg block comments after translation with aggressive clean-up
 function freedomtranslate_restore_gutenberg_blocks($html, $placeholders) {
     foreach ($placeholders as $ph => $original) {
-        // Regex to match the span wrapper and token, tolerating any injected whitespaces
         $pattern = '/<span[^>]*translate="no"[^>]*>\s*' . preg_quote($ph, '/') . '\s*<\/span>/i';
         
-        // Attempt to replace the entire span first to keep the DOM clean
         if (preg_match($pattern, $html)) {
             $html = preg_replace($pattern, $original, $html);
         } else {
-            // Fallback: if the LLM stripped the HTML span entirely, replace the raw token
             $html = str_replace($ph, $original, $html);
         }
     }
+    
+    // Safety Net: Cleanup any lingering corrupted or half-translated wp tags left by the LLM
+    $html = preg_replace('/\/wp:[a-zA-Z0-9\-_]+(\/[a-zA-Z0-9\-_]+)?/i', '', $html);
+    $html = preg_replace('/wp:[a-zA-Z0-9\-_]+(\/[a-zA-Z0-9\-_]+)?/i', '', $html);
+
     return $html;
 }
 
