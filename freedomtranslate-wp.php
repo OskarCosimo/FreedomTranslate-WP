@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.2.4
+Version: 2.2.5
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -310,7 +310,12 @@ add_filter('rank_math/frontend/canonical', function($canonical) {
 add_action('template_redirect', 'freedomtranslate_seo_language_redirect', 1);
 
 function freedomtranslate_seo_language_redirect() {
+    // Prevent redirect for admin, ajax, cron, rest OR RSS feeds
     if (is_admin() || wp_doing_ajax() || wp_doing_cron() || (defined('REST_REQUEST') && REST_REQUEST)) return;
+    
+    // Bypass redirection for RSS feeds to avoid breaking feed readers
+    if (is_feed() || strpos($_SERVER['REQUEST_URI'], '/feed') !== false) return;
+    
     if (get_option('freedomtranslate_seo_permalinks', '0') !== '1') return;
 
     $site_source_lang = substr(get_option('WPLANG', 'en'), 0, 2);
@@ -1984,6 +1989,41 @@ add_action('admin_init', function() {
     }
 });
 
+/**
+ * Helper to extract the correct Post ID from a translated permalink structure.
+ * Prevents url_to_postid() from failing when a language code (e.g. /it/) is present.
+ */
+function freedomtranslate_get_clean_post_id($input) {
+    if (is_numeric($input)) {
+        return intval($input);
+    }
+    
+    // Strip the language prefix (/it/, /en/, etc.) from the path
+    $parsed = wp_parse_url($input);
+    if (isset($parsed['path'])) {
+        $path = $parsed['path'];
+        $site_path = wp_parse_url(home_url(), PHP_URL_PATH);
+        $site_path = $site_path ? rtrim($site_path, '/') : '';
+        
+        $relative = $site_path ? substr($path, strlen($site_path)) : $path;
+        
+        // Match language prefix (e.g., /it/ or /it)
+        if (preg_match('#^/([a-z]{2})(?:/|$)#i', $relative, $matches)) {
+            $lang_code = $matches[1];
+            $clean_relative = preg_replace('#^/' . $lang_code . '(/|$)#i', '/', $relative);
+            $new_path = $site_path . $clean_relative;
+            $input = str_replace($path, $new_path, $input);
+        }
+    }
+
+    $post_id = url_to_postid($input);
+    if ($post_id === 0 && function_exists('attachment_url_to_postid')) {
+        $post_id = attachment_url_to_postid($input);
+    }
+    
+    return $post_id;
+}
+
 function freedomtranslate_settings_page() {
     if (!current_user_can('manage_options')) wp_die(esc_html__('You do not have sufficient permissions to access this page.'));
 
@@ -2000,15 +2040,8 @@ function freedomtranslate_settings_page() {
         
         $input = sanitize_text_field(wp_unslash($_POST['direct_post_input']));
         
-        $post_id = 0;
-        if (is_numeric($input)) {
-            $post_id = intval($input);
-        } else {
-            $post_id = url_to_postid($input);
-            if ($post_id === 0 && function_exists('attachment_url_to_postid')) {
-                $post_id = attachment_url_to_postid($input);
-            }
-        }
+        // Use the new helper to resolve the post ID correctly even with translated permalinks
+        $post_id = freedomtranslate_get_clean_post_id($input);
         
         $selected_langs = isset($_POST['direct_langs']) ? array_map('sanitize_text_field', wp_unslash($_POST['direct_langs'])) : [];
         update_option('freedomtranslate_direct_last_langs', $selected_langs);
@@ -3749,6 +3782,7 @@ add_action('wp_ajax_ft_check_existing_translations', function() {
     
     $post_id_raw = $_POST['post_id'] ?? '';
     $langs = isset($_POST['langs']) ? array_map('sanitize_text_field', (array)$_POST['langs']) : [];
+    $post_id = freedomtranslate_get_clean_post_id($post_id_raw);
 
     // Parse URL to Post ID if needed
     $post_id = 0;
