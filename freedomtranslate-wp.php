@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.2.5
+Version: 2.2.6
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -2521,6 +2521,9 @@ function freedomtranslate_settings_page() {
     if (isset($_POST['freedomtranslate_purge_cron'])) {
     check_admin_referer('freedomtranslate_purge_cron', 'freedomtranslate_nonce_cron');
 
+    // 1. Clear scheduled watchdog hook
+    wp_clear_scheduled_hook('freedomtranslate_queue_watchdog');
+
     $active_hashes = $wpdb->get_col(
         "SELECT hash_key FROM $table WHERE status IN ('pending','processing')"
     );
@@ -2538,14 +2541,16 @@ function freedomtranslate_settings_page() {
     if ( is_array( $crons ) ) {
         foreach ( $crons as $timestamp => $cron_hooks ) {
             if ( isset( $cron_hooks['freedomtranslate_async_translate'] ) || 
-            isset( $cron_hooks['freedomtranslate_async_string_translate'] ) ||
+                 isset( $cron_hooks['freedomtranslate_async_string_translate'] ) ||
                  isset( $cron_hooks['freedomtranslate_trigger_prewarm'] ) || 
-                 isset( $cron_hooks['freedomtranslate_master_ping'] ) ) {
+                 isset( $cron_hooks['freedomtranslate_master_ping'] ) ||
+                 isset( $cron_hooks['freedomtranslate_queue_watchdog'] ) ) { // <--- Added condition
                 
                 unset( $crons[$timestamp]['freedomtranslate_async_translate'] );
                 unset( $crons[$timestamp]['freedomtranslate_async_string_translate'] );
                 unset( $crons[$timestamp]['freedomtranslate_trigger_prewarm'] );
                 unset( $crons[$timestamp]['freedomtranslate_master_ping'] );
+                unset( $crons[$timestamp]['freedomtranslate_queue_watchdog'] ); // <--- Unset watchdog entry
                 if ( empty( $crons[$timestamp] ) ) unset( $crons[$timestamp] );
                 $found = true;
             }
