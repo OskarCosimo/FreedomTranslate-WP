@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.2.9
+Version: 2.3.0
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -1211,11 +1211,27 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
             return; 
         } 
 
-        $translated_chunk = freedomtranslate_do_api_translation($chunks[$done_chunks], $site_lang, $user_lang, 'html', $hash_key);
+        // Retry logic: allow up to 3 attempts with a delay in case Ollama was unloaded and needs to cold-start
+        $translated_chunk = false;
+        $max_retries = 3;
+        $retry_count = 0;
 
-        // Catch timeout or connection errors gracefully
+        while ($retry_count < $max_retries) {
+            $translated_chunk = freedomtranslate_do_api_translation($chunks[$done_chunks], $site_lang, $user_lang, 'html', $hash_key);
+            
+            if (!is_wp_error($translated_chunk)) {
+                break;
+            }
+
+            $retry_count++;
+            if ($retry_count < $max_retries) {
+                // Wait 4 seconds to give Ollama time to reload the model into VRAM
+                sleep(4);
+            }
+        }
+
+        // If it still failed after 3 attempts, mark timeout and exit
         if (is_wp_error($translated_chunk)) {
-            // Write 'timeout' status to DB and abort worker immediately
             ft_update_progress($hash_key, $post_id, $user_lang, $done_chunks, 'timeout', $total_chunks);
             return; 
         }
@@ -1224,16 +1240,9 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         global $wpdb;
         $table = $wpdb->prefix . 'freedomtranslate_cache';
 
-        // 1. Check if a global panic occurred WHILE we were waiting for the AI
-        if (get_option('ft_last_panic_time', 0) > $worker_start_time) {
-            // Silently kill the worker and discard the chunk
-            return; 
-        }
-
-        // 2. Check if the job was manually deleted or cleared from the UI WHILE we were waiting
+        // Check if the job was manually deleted or cleared from the UI WHILE we were waiting
         $job_still_exists = $wpdb->get_var($wpdb->prepare("SELECT hash_key FROM $table WHERE hash_key = %s", $hash_key));
         if (!$job_still_exists) {
-            // The record is gone. Silently abort so we don't resurrect it with a REPLACE command.
             return; 
         }
         // --- END SAFETY DOUBLE-CHECK ---
@@ -1247,13 +1256,15 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
 
         // Break loop and reschedule if execution time limit is reached
         if ($done_chunks < $total_chunks && (time() - $start_time) >= $max_execution_time) {
-            $args = [$hash_key, $site_lang, $user_lang, $post_id, uniqid('', true)];
+            $args = [$hash_key, $site_lang, $user_lang, (int)$post_id, uniqid('', true)];
             wp_schedule_single_event(time(), 'freedomtranslate_async_translate', $args);
+            
+            // Spawn next batch immediately so Ollama keepalive doesn't expire in between
+            spawn_cron();
             return; 
         }
     }
 
-    // Assemble the final content from cached chunks
     // Assemble the final content from cached chunks
     $final_content = '';
     for ($i = 0; $i < $total_chunks; $i++) {
