@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.2.6
+Version: 2.2.7
 Author: thefreedom
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -31,6 +31,9 @@ define('FREEDOMTRANSLATE_CHUNK_SIZE_OPTION',          'freedomtranslate_chunk_si
 define('FREEDOMTRANSLATE_STRICT_MANUAL_OPTION',       'freedomtranslate_strict_manual');
 define('FREEDOMTRANSLATE_NUM_CTX_OPTION', 'freedomtranslate_num_ctx');
 define('FREEDOMTRANSLATE_SEO_PERMALINKS_OPTION',       'freedomtranslate_seo_permalinks');
+define('FREEDOMTRANSLATE_AI_LABEL_ENABLE_OPTION',      'freedomtranslate_ai_label_enable');
+define('FREEDOMTRANSLATE_AI_LABEL_TEXT_OPTION',        'freedomtranslate_ai_label_text');
+
 
 /**
  * Enqueue jQuery UI Sortable for the languages priority drag & drop
@@ -558,7 +561,8 @@ function freedomtranslate_protect_shortcodes($html) {
             $ph = '__FTSC_' . $count . '__';
             
             // Wrap the token in a standard non-translatable HTML span to force API compliance
-            $wrapped_ph = '<span translate="no" class="notranslate">' . $ph . '</span>';
+            // Add spaces before and after the placeholder to prevent it from merging with surrounding text
+            $wrapped_ph = ' <span translate="no" class="notranslate">' . $ph . '</span> ';
             
             $placeholders[$ph] = $match;
             
@@ -573,7 +577,8 @@ function freedomtranslate_protect_shortcodes($html) {
 function freedomtranslate_restore_shortcodes($html, $placeholders) {
     foreach ($placeholders as $ph => $original) {
         // Regex to match the span wrapper and token, tolerating any injected whitespaces from LLMs
-        $pattern = '/<span[^>]*translate="no"[^>]*>\s*' . preg_quote($ph, '/') . '\s*<\/span>/i';
+        // The regex now optionally matches the extra spaces we added in protect_shortcodes
+        $pattern = '/\s*<span[^>]*translate="no"[^>]*>\s*' . preg_quote($ph, '/') . '\s*<\/span>\s*/i';
         
         // Attempt to replace the entire span first to keep the DOM clean
         if (preg_match($pattern, $html)) {
@@ -595,7 +600,7 @@ function freedomtranslate_protect_gutenberg_blocks($html) {
         $count = 0;
         foreach ($matches[0] as $match) {
             $ph = '__FTWP_' . $count . '__';
-            $wrapped_ph = '<span translate="no" class="notranslate">' . $ph . '</span>';
+            $wrapped_ph = ' <span translate="no" class="notranslate">' . $ph . '</span> ';
             $placeholders[$ph] = $match;
             $html = preg_replace('/' . preg_quote($match, '/') . '/', $wrapped_ph, $html, 1);
             $count++;
@@ -607,7 +612,7 @@ function freedomtranslate_protect_gutenberg_blocks($html) {
 // Restore WordPress Gutenberg block comments after translation with aggressive clean-up
 function freedomtranslate_restore_gutenberg_blocks($html, $placeholders) {
     foreach ($placeholders as $ph => $original) {
-        $pattern = '/<span[^>]*translate="no"[^>]*>\s*' . preg_quote($ph, '/') . '\s*<\/span>/i';
+        $pattern = '/\s*<span[^>]*translate="no"[^>]*>\s*' . preg_quote($ph, '/') . '\s*<\/span>\s*/i';
         
         if (preg_match($pattern, $html)) {
             $html = preg_replace($pattern, $original, $html);
@@ -791,6 +796,20 @@ function freedomtranslate_translate_ollama($text, $source, $target, $format = 't
     return new WP_Error('apierror', 'Missing response from Ollama API');
 }
 
+/**
+ * Universal wrapper for API translation calls
+ */
+function freedomtranslate_do_api_translation($text, $source, $target, $format = 'text', $job_id = '') {
+    $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
+    if ($service === 'google_official') {
+        return freedomtranslate_translate_google_official($text, $source, $target, $format);
+    } elseif ($service === 'ollama') {
+        return freedomtranslate_translate_ollama($text, $source, $target, $format, $job_id);
+    } else {
+        return freedomtranslate_translate_libre($text, $source, $target, $format, $job_id);
+    }
+}
+
 function freedomtranslate_protect_excluded_words_in_html($html, $excluded_words) {
     $dom = new DOMDocument();
     libxml_use_internal_errors(true);
@@ -837,6 +856,44 @@ function freedomtranslate_get_ttl_days($post_id = 0) {
 // ========================================================================
 // 5. ASYNC WORKERS & POST FILTERS
 // ========================================================================
+
+/**
+ * Helper to safely remove scheduled translation crons by hash keys
+ *
+ * @param string|array $hash_keys
+ * @return bool
+ */
+function freedomtranslate_remove_crons_by_hash( $hash_keys ) {
+    if ( empty( $hash_keys ) ) return false;
+    if ( ! is_array( $hash_keys ) ) $hash_keys = [ $hash_keys ];
+
+    $crons = _get_cron_array();
+    if ( ! is_array( $crons ) ) return false;
+
+    $changed = false;
+    foreach ( $crons as $timestamp => $cron_hooks ) {
+        if ( isset( $cron_hooks['freedomtranslate_async_translate'] ) ) {
+            foreach ( $cron_hooks['freedomtranslate_async_translate'] as $sig => $event ) {
+                if ( isset( $event['args'][0] ) && in_array( $event['args'][0], $hash_keys, true ) ) {
+                    unset( $crons[$timestamp]['freedomtranslate_async_translate'][$sig] );
+                    if ( empty( $crons[$timestamp]['freedomtranslate_async_translate'] ) ) {
+                        unset( $crons[$timestamp]['freedomtranslate_async_translate'] );
+                    }
+                    if ( empty( $crons[$timestamp] ) ) {
+                        unset( $crons[$timestamp] );
+                    }
+                    $changed = true;
+                }
+            }
+        }
+    }
+    
+    if ( $changed ) {
+        update_option( 'cron', $crons );
+    }
+    
+    return $changed;
+}
 
 function freedomtranslate_translate($text, $source, $target, $format = 'text', $post_id = 0, $custom_hash = '') {
     // Check if required WordPress functions are available
@@ -889,21 +946,10 @@ function freedomtranslate_translate($text, $source, $target, $format = 'text', $
     // Return early if cache hit
     if ($cached !== false) return $cached;
 
-    // Execute translation based on selected service
-    switch ($service) {
-        case 'googlehash':       
-            $translated = $text; 
-            break;
-        case 'google_official':  
-            $translated = freedomtranslate_translate_google_official($text, $source, $target, $format); 
-            break;
-        case 'ollama':           
-            $translated = freedomtranslate_translate_ollama($text, $source, $target, $format); 
-            break;
-        case 'libretranslate':
-        default:
-            $translated = freedomtranslate_translate_libre($text, $source, $target, $format);
-            break;
+    if ($service === 'googlehash') {
+        $translated = $text;
+    } else {
+        $translated = freedomtranslate_do_api_translation($text, $source, $target, $format, $active_hash);
     }
 
     // Abort if API failed
@@ -942,15 +988,7 @@ function freedomtranslate_string_worker($string_id, $text, $site_lang, $target_l
     if (get_option('ft_last_panic_time', 0) > $worker_start_time) return;
     if (empty($string_id) || empty($target_lang)) return;
 
-    $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
-
-    if ($service === 'google_official') {
-        $translated = freedomtranslate_translate_google_official($text, $site_lang, $target_lang, 'text');
-    } elseif ($service === 'ollama') {
-        $translated = freedomtranslate_translate_ollama($text, $site_lang, $target_lang, 'text');
-    } else {
-        $translated = freedomtranslate_translate_libre($text, $site_lang, $target_lang, 'text');
-    }
+    $translated = freedomtranslate_do_api_translation($text, $site_lang, $target_lang, 'text');
 
     if (is_wp_error($translated)) {
         return; 
@@ -1111,16 +1149,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
             return; 
         } 
 
-        // Check selected translation engine
-        $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
-        
-        if ($service === 'google_official') {
-            $translated_chunk = freedomtranslate_translate_google_official($chunks[$done_chunks], $site_lang, $user_lang, 'html');
-        } elseif ($service === 'ollama') {
-            $translated_chunk = freedomtranslate_translate_ollama($chunks[$done_chunks], $site_lang, $user_lang, 'html', $hash_key);
-        } else {
-            $translated_chunk = freedomtranslate_translate_libre($chunks[ $done_chunks ], $site_lang, $user_lang, 'html', $hash_key);
-        }
+        $translated_chunk = freedomtranslate_do_api_translation($chunks[$done_chunks], $site_lang, $user_lang, 'html', $hash_key);
 
         // Catch timeout or connection errors gracefully
         if (is_wp_error($translated_chunk)) {
@@ -1179,7 +1208,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
         $final_content = freedomtranslate_restore_gutenberg_blocks($final_content, $wp_placeholders);
     }
 
-    // Restore shortcodes before saving
+    // Restore shortcodes before saving (just in case they were nested in gutenberg blocks)
     $final_content = freedomtranslate_restore_shortcodes($final_content, $sc_placeholders);
 
     global $wpdb;
@@ -1365,7 +1394,17 @@ function freedomtranslate_filter_post_content($content, $id = null) {
 
         // Output instantly if cache is valid and permanent
         if ($is_completed && $cached_translation !== false) {
-            return do_shortcode($cached_translation);
+            $output = do_shortcode($cached_translation);
+            
+            // Add the AI label for body content if enabled
+            if ($filter_name === 'the_content' && get_option(FREEDOMTRANSLATE_AI_LABEL_ENABLE_OPTION, '0') === '1') {
+                $label_text = get_option(FREEDOMTRANSLATE_AI_LABEL_TEXT_OPTION, 'This post is translated thanks to artificial intelligence');
+                if (!empty(trim($label_text))) {
+                    $output .= '<div class="freedomtranslate-ai-label" style="font-size: 0.9em; font-style: italic; color: #777; margin-top: 20px; padding-top: 10px; border-top: 1px solid #eee;">' . esc_html($label_text) . '</div>';
+                }
+            }
+            
+            return $output;
         }
 
         if (freedomtranslate_is_bot()) return $content;
@@ -1392,7 +1431,17 @@ function freedomtranslate_filter_post_content($content, $id = null) {
     }
 
     // Legacy Synchronous Fallback
-    return freedomtranslate_translate($content, $site_source_lang, $user_lang, 'html', $current_obj_id, $active_hash);
+    $translated = freedomtranslate_translate($content, $site_source_lang, $user_lang, 'html', $current_obj_id, $active_hash);
+    
+    // Add the AI label for body content in synchronous mode as well
+    if ($filter_name === 'the_content' && get_option(FREEDOMTRANSLATE_AI_LABEL_ENABLE_OPTION, '0') === '1') {
+        $label_text = get_option(FREEDOMTRANSLATE_AI_LABEL_TEXT_OPTION, 'This post is translated thanks to artificial intelligence');
+        if (!empty(trim($label_text))) {
+            $translated .= '<div class="freedomtranslate-ai-label" style="font-size: 0.9em; font-style: italic; color: #777; margin-top: 20px; padding-top: 10px; border-top: 1px solid #eee;">' . esc_html($label_text) . '</div>';
+        }
+    }
+    
+    return $translated;
 }
 
 // HOOK
@@ -2145,23 +2194,7 @@ function freedomtranslate_settings_page() {
             $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $hash_key . '_chunk_%'));
             $wpdb->delete($table, ['hash_key' => $hash_key]);
 
-            $crons = _get_cron_array();
-            if (is_array($crons)) {
-                $changed = false;
-                foreach ($crons as $timestamp => $cron_hooks) {
-                    if (isset($cron_hooks['freedomtranslate_async_translate'])) {
-                        foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                            if (isset($event['args'][0]) && $event['args'][0] === $hash_key) {
-                                unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
-                                if (empty($crons[$timestamp]['freedomtranslate_async_translate'])) unset($crons[$timestamp]['freedomtranslate_async_translate']);
-                                if (empty($crons[$timestamp])) unset($crons[$timestamp]);
-                                $changed = true;
-                            }
-                        }
-                    }
-                }
-                if ($changed) update_option('cron', $crons);
-            }
+            freedomtranslate_remove_crons_by_hash($hash_key);
             echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'cancelled', $clean_url)) . '";</script>';
             exit;
         }
@@ -2195,21 +2228,7 @@ function freedomtranslate_settings_page() {
                     $wpdb->delete($table, ['hash_key' => $h]);
                 }
                 
-                $crons = _get_cron_array();
-                if (is_array($crons)) {
-                    $changed = false;
-                    foreach ($crons as $timestamp => $cron_hooks) {
-                        if (isset($cron_hooks['freedomtranslate_async_translate'])) {
-                            foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                                if (isset($event['args'][0]) && in_array($event['args'][0], $hashes)) {
-                                    unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
-                                    $changed = true;
-                                }
-                            }
-                        }
-                    }
-                    if ($changed) update_option('cron', $crons);
-                }
+                freedomtranslate_remove_crons_by_hash($hashes);
             }
             echo '<script>window.location.href="' . esc_url_raw(add_query_arg('ft_msg', 'cancelled', $clean_url)) . '";</script>';
             exit;
@@ -2288,22 +2307,7 @@ function freedomtranslate_settings_page() {
                 $wpdb->delete($table, ['hash_key' => $h]);
             }
             
-            // Clean up crons
-            $crons = _get_cron_array();
-            if (is_array($crons)) {
-                $changed = false;
-                foreach ($crons as $timestamp => $cron_hooks) {
-                    if (isset($cron_hooks['freedomtranslate_async_translate'])) {
-                        foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                            if (isset($event['args'][0]) && in_array($event['args'][0], $hashes)) {
-                                unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
-                                $changed = true;
-                            }
-                        }
-                    }
-                }
-                if ($changed) update_option('cron', $crons);
-            }
+            freedomtranslate_remove_crons_by_hash($hashes);
             echo '<div class="notice notice-success is-dismissible"><p>Bulk jobs cancelled and removed.</p></div>';
         }
         // Queue Table: Pause Jobs
@@ -2314,22 +2318,7 @@ function freedomtranslate_settings_page() {
                 $wpdb->update($table, ['status' => 'paused'], ['hash_key' => $h]);
             }
             
-            // Remove paused jobs from cron
-            $crons = _get_cron_array();
-            if (is_array($crons)) {
-                $changed = false;
-                foreach ($crons as $timestamp => $cron_hooks) {
-                    if (isset($cron_hooks['freedomtranslate_async_translate'])) {
-                        foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                            if (isset($event['args'][0]) && in_array($event['args'][0], $hashes)) {
-                                unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
-                                $changed = true;
-                            }
-                        }
-                    }
-                }
-                if ($changed) update_option('cron', $crons);
-            }
+            freedomtranslate_remove_crons_by_hash($hashes);
             echo '<div class="notice notice-success is-dismissible"><p>Bulk jobs paused.</p></div>';
         }
         // Queue Table: Resume Jobs
@@ -2470,6 +2459,13 @@ function freedomtranslate_settings_page() {
         if (isset($_POST['freedomtranslate_words_exclude'])) {
             $words = array_filter(array_map('trim', preg_split('/\R/', sanitize_textarea_field(wp_unslash($_POST['freedomtranslate_words_exclude'])))));
             update_option(FREEDOMTRANSLATE_WORDS_EXCLUDE_OPTION, $words);
+        }
+        
+        $ai_label_enable = isset($_POST['freedomtranslate_ai_label_enable']) ? '1' : '0';
+        update_option(FREEDOMTRANSLATE_AI_LABEL_ENABLE_OPTION, $ai_label_enable);
+
+        if (isset($_POST['freedomtranslate_ai_label_text'])) {
+            update_option(FREEDOMTRANSLATE_AI_LABEL_TEXT_OPTION, sanitize_text_field(wp_unslash($_POST['freedomtranslate_ai_label_text'])));
         }
         
         echo '<div class="notice notice-success"><p>General settings saved.</p></div>';
@@ -2723,6 +2719,31 @@ function freedomtranslate_settings_page() {
                     <div style="padding:15px; background:#e5f5fa; border-left:4px solid #00a0d2; margin-top:20px;">
                         <p style="margin:0;"><strong>ℹ️ Google Translate (Hash-based) is active.</strong><br>This mode works entirely on the client side. It does not require API keys, background tasks, or local caching.</p>
                     </div>
+                </div>
+                
+                <div id="ui_block_ai_label">
+                    <hr>
+                    <h3>Display Settings</h3>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">AI Translation Label</th>
+                            <td>
+                                <label>
+                                    <?php $ai_label_val = get_option(FREEDOMTRANSLATE_AI_LABEL_ENABLE_OPTION, '0'); ?>
+                                    <input type="checkbox" name="freedomtranslate_ai_label_enable" value="1" <?php checked($ai_label_val, '1'); ?>>
+                                    <strong>Append a label at the end of translated posts</strong>
+                                </label>
+                                <p class="description">If enabled, the text below will be added to the bottom of the content when viewing a translated post.</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="freedomtranslate_ai_label_text">Label Text</label></th>
+                            <td>
+                                <?php $label_text_val = get_option(FREEDOMTRANSLATE_AI_LABEL_TEXT_OPTION, 'This post is translated thanks to artificial intelligence'); ?>
+                                <input type="text" id="freedomtranslate_ai_label_text" name="freedomtranslate_ai_label_text" value="<?php echo esc_attr($label_text_val); ?>" class="regular-text" style="width: 100%; max-width: 500px;">
+                            </td>
+                        </tr>
+                    </table>
                 </div>
 
                 <div id="ui_block_automation">
@@ -3543,7 +3564,7 @@ add_action('freedomtranslate_queue_watchdog', function() {
             $time_elapsed = $current_time - (int)$tracker['timestamp'];
             
             if ($time_elapsed >= $timeout_seconds) {
-                // Il processo è ufficialmente uno "Zombie". Lo forziamo in timeout.
+                // The process is officially a "Zombie". Force it into timeout.
                 $wpdb->update(
                     $table, 
                     ['status' => 'timeout'], 
@@ -3733,22 +3754,7 @@ add_action('wp_ajax_ft_queue_pause', function() {
     set_transient('ft_pause_' . $hash_key, '1', 600); 
     $wpdb->update($table, ['status' => 'paused'], ['hash_key' => $hash_key]);
 
-    // Rimuovi dal cron
-    $crons = _get_cron_array();
-    if (is_array($crons)) {
-        $changed = false;
-        foreach ($crons as $timestamp => $cron_hooks) {
-            if (isset($cron_hooks['freedomtranslate_async_translate'])) {
-                foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                    if (isset($event['args'][0]) && $event['args'][0] === $hash_key) {
-                        unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
-                        $changed = true;
-                    }
-                }
-            }
-        }
-        if ($changed) update_option('cron', $crons);
-    }
+    freedomtranslate_remove_crons_by_hash($hash_key);
     wp_send_json_success();
 });
 
@@ -3763,21 +3769,7 @@ add_action('wp_ajax_ft_queue_cancel', function() {
     $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE hash_key LIKE %s", $hash_key . '_chunk_%'));
     $wpdb->delete($table, ['hash_key' => $hash_key]);
 
-    $crons = _get_cron_array();
-    if (is_array($crons)) {
-        $changed = false;
-        foreach ($crons as $timestamp => $cron_hooks) {
-            if (isset($cron_hooks['freedomtranslate_async_translate'])) {
-                foreach ($cron_hooks['freedomtranslate_async_translate'] as $sig => $event) {
-                    if (isset($event['args'][0]) && $event['args'][0] === $hash_key) {
-                        unset($crons[$timestamp]['freedomtranslate_async_translate'][$sig]);
-                        $changed = true;
-                    }
-                }
-            }
-        }
-        if ($changed) update_option('cron', $crons);
-    }
+    freedomtranslate_remove_crons_by_hash($hash_key);
     wp_send_json_success();
 });
 
