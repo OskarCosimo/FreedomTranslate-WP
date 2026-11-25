@@ -1,9 +1,8 @@
-<?php
-// /freedomtranslate-wp.php
+<?php // /freedomtranslate-wp.php
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate on-the-fly with AI or remote URL with API + custom database cache, and static strings manager.
-Version: 2.3.1
+Version: 2.3.2
 Author: thefreedom
 Text Domain: freedomtranslate-wp
 Requires at least: 5.8
@@ -15,7 +14,7 @@ License URI: https://www.gnu.org/licenses/gpl-3.0.html
 defined('ABSPATH') or die('No script kiddies please!');
 
 // Plugin constants
-define('FREEDOMTRANSLATE_VERSION',                    '2.3.1');
+define('FREEDOMTRANSLATE_VERSION',                    '2.3.2');
 define('FREEDOMTRANSLATE_API_URL_OPTION',             'freedomtranslate_api_url');
 define('FREEDOMTRANSLATE_API_URL_DEFAULT',             'http://localhost:5000/translate');
 define('FREEDOMTRANSLATE_API_KEY_OPTION',             'freedomtranslate_api_key');
@@ -227,18 +226,39 @@ function freedomtranslate_is_bot() {
  */
 function freedomtranslate_inject_lang_prefix($url, $lang) {
     $parsed = wp_parse_url($url);
+    if (!is_array($parsed)) {
+        return $url;
+    }
 
-    $scheme = isset($parsed['scheme']) ? $parsed['scheme'] . '://' : '';
-    $host   = isset($parsed['host']) ? $parsed['host'] : '';
-    $port   = isset($parsed['port']) ? ':' . $parsed['port'] : '';
-    $path   = isset($parsed['path']) ? $parsed['path'] : '';
-    $query  = isset($parsed['query']) ? '?' . $parsed['query'] : '';
+    $home_host = wp_parse_url(home_url(), PHP_URL_HOST);
+    if (!empty($parsed['host']) && !empty($home_host) && strcasecmp($parsed['host'], $home_host) !== 0) {
+        return $url;
+    }
+
+    $scheme   = isset($parsed['scheme']) ? $parsed['scheme'] . '://' : '';
+    $host     = isset($parsed['host']) ? $parsed['host'] : '';
+    $port     = isset($parsed['port']) ? ':' . $parsed['port'] : '';
+    $path     = isset($parsed['path']) ? $parsed['path'] : '';
+    $query    = isset($parsed['query']) ? '?' . $parsed['query'] : '';
+    $fragment = isset($parsed['fragment']) ? '#' . $parsed['fragment'] : '';
 
     $site_path = wp_parse_url(home_url(), PHP_URL_PATH);
     $site_path = $site_path ? rtrim($site_path, '/') : '';
 
+    $relative_path = $path;
     if ($site_path && strpos($path, $site_path) === 0) {
         $relative_path = substr($path, strlen($site_path));
+    }
+
+    // Prevent double language prefix injection (e.g., when both post_link and the_permalink fire)
+    if (preg_match('#^/([a-z]{2})(?:/|$)#i', '/' . ltrim($relative_path, '/'), $matches)) {
+        $existing_lang = strtolower($matches[1]);
+        if ($existing_lang === strtolower($lang) || freedomtranslate_is_language_enabled($existing_lang)) {
+            return $url;
+        }
+    }
+
+    if ($site_path && strpos($path, $site_path) === 0) {
         $new_path = $site_path . '/' . $lang . '/' . ltrim($relative_path, '/');
     } else {
         $new_path = '/' . $lang . '/' . ltrim($path, '/');
@@ -246,34 +266,50 @@ function freedomtranslate_inject_lang_prefix($url, $lang) {
 
     $new_path = preg_replace('#/{2,}#', '/', $new_path);
 
-    return $scheme . $host . $port . $new_path . $query;
+    return $scheme . $host . $port . $new_path . $query . $fragment;
 }
 
-// 1. UNIVERSAL LINK FILTERING (Priority 999 to override SEO plugins)
-$freedomtranslate_link_filters = [
-    'the_permalink', 'post_link', 'page_link', 'post_type_archive_link',
-    'category_link', 'tag_link', 'term_link', 'author_link',
-    'day_link', 'month_link', 'year_link', 'search_link', 'get_pagenum_link'
-];
+/**
+ * 1. UNIVERSAL LINK FILTERING
+ * Deferred to template_redirect (priority 20) so request parsing, canonical redirects,
+ * and third-party permalink plugins (e.g. Custom Permalinks) see clean unprefixed URLs
+ * before templates render localized links.
+ */
+function freedomtranslate_register_link_filters() {
+    if (is_admin()) {
+        return;
+    }
 
-foreach ($freedomtranslate_link_filters as $filter) {
-    add_filter($filter, function($url) {
-        $lang      = freedomtranslate_get_user_lang();
-        $site_lang = freedomtranslate_get_site_source_lang();
+    $freedomtranslate_link_filters = [
+        'the_permalink', 'post_link', 'page_link', 'post_type_link', 'attachment_link',
+        'post_type_archive_link', 'category_link', 'tag_link', 'term_link',
+        'author_link', 'day_link', 'month_link', 'year_link', 'search_link', 'get_pagenum_link'
+    ];
 
-        if ($lang !== $site_lang) {
-            if (get_option(FREEDOMTRANSLATE_SEO_PERMALINKS_OPTION, '0') === '1') {
-                return freedomtranslate_inject_lang_prefix($url, $lang);
-            } else {
-                return add_query_arg('freedomtranslate_lang', $lang, $url);
+    foreach ($freedomtranslate_link_filters as $filter) {
+        add_filter($filter, function($url) {
+            if (is_admin()) {
+                return $url;
             }
-        }
-        return $url;
-    }, 999);
-}
 
-// 2. INTERNAL URL REWRITE
-add_action('plugins_loaded', 'freedomtranslate_internal_url_rewrite', 1);
+            $lang      = freedomtranslate_get_user_lang();
+            $site_lang = freedomtranslate_get_site_source_lang();
+
+            if ($lang !== $site_lang) {
+                if (get_option(FREEDOMTRANSLATE_SEO_PERMALINKS_OPTION, '0') === '1') {
+                    return freedomtranslate_inject_lang_prefix($url, $lang);
+                } else {
+                    return add_query_arg('freedomtranslate_lang', $lang, $url);
+                }
+            }
+            return $url;
+        }, 999);
+    }
+}
+add_action('template_redirect', 'freedomtranslate_register_link_filters', 20);
+
+// 2. INTERNAL URL REWRITE (Run very early before other plugins inspect REQUEST_URI)
+add_action('plugins_loaded', 'freedomtranslate_internal_url_rewrite', -999);
 
 function freedomtranslate_internal_url_rewrite() {
     if (is_admin() || empty($_SERVER['REQUEST_URI'])) {
@@ -283,7 +319,8 @@ function freedomtranslate_internal_url_rewrite() {
         return;
     }
 
-    $request_uri = sanitize_text_field(wp_unslash($_SERVER['REQUEST_URI']));
+    // Preserve percent-encoded sequences while stripping control characters
+    $request_uri = preg_replace('/[\x00-\x1F\x7F]/', '', wp_unslash($_SERVER['REQUEST_URI']));
 
     if (!defined('FT_ORIGINAL_URI')) {
         define('FT_ORIGINAL_URI', $request_uri);
@@ -311,10 +348,8 @@ function freedomtranslate_internal_url_rewrite() {
                 define('FT_IS_PRETTY_URL', $lang_code);
             }
 
-            if (!isset($_GET['freedomtranslate_lang'])) {
-                $_GET['freedomtranslate_lang']     = $lang_code;
-                $_REQUEST['freedomtranslate_lang'] = $lang_code;
-            }
+            // Store detected pretty-URL language internally without polluting $_GET before WP::parse_request()
+            $GLOBALS['freedomtranslate_pretty_lang'] = $lang_code;
 
             $remaining_path    = substr($relative_path, strlen('/' . $lang_code));
             $new_relative_path = '/' . ltrim($remaining_path, '/');
@@ -327,17 +362,36 @@ function freedomtranslate_internal_url_rewrite() {
 
             $_SERVER['REQUEST_URI'] = $new_uri;
 
-            if (isset($_SERVER['PATH_INFO']))    $_SERVER['PATH_INFO']    = $new_path;
-            if (isset($_SERVER['REDIRECT_URL'])) $_SERVER['REDIRECT_URL'] = $new_path;
-            if (isset($_SERVER['SCRIPT_URL']))   $_SERVER['SCRIPT_URL']   = $new_path;
+            if (isset($_SERVER['PATH_INFO']))      $_SERVER['PATH_INFO']      = $new_path;
+            if (isset($_SERVER['ORIG_PATH_INFO'])) $_SERVER['ORIG_PATH_INFO'] = $new_path;
+            if (isset($_SERVER['REDIRECT_URL']))   $_SERVER['REDIRECT_URL']   = $new_path;
+            if (isset($_SERVER['SCRIPT_URL']))     $_SERVER['SCRIPT_URL']     = $new_path;
+            if (isset($_SERVER['UNENCODED_URL']))  $_SERVER['UNENCODED_URL']  = $new_uri;
         }
     }
 }
 
-// 3. DISABLE NATIVE & PLUGIN REDIRECTS ON TRANSLATED URLS
+// 3. HANDLE CANONICAL REDIRECTS SAFELY ON TRANSLATED URLS
 add_filter('redirect_canonical', function($redirect_url, $requested_url) {
-    if (defined('FT_IS_PRETTY_URL')) return false;
-    return $redirect_url;
+    if (!defined('FT_IS_PRETTY_URL')) {
+        return $redirect_url;
+    }
+
+    if (empty($redirect_url)) {
+        return false;
+    }
+
+    $prefixed_redirect = freedomtranslate_inject_lang_prefix($redirect_url, FT_IS_PRETTY_URL);
+    $parsed_target     = wp_parse_url($prefixed_redirect);
+    $target_uri        = (isset($parsed_target['path']) ? $parsed_target['path'] : '/')
+        . (isset($parsed_target['query']) ? '?' . $parsed_target['query'] : '');
+
+    // Abort redirect if the localized canonical URL already matches the original requested URI
+    if (defined('FT_ORIGINAL_URI') && $target_uri === FT_ORIGINAL_URI) {
+        return false;
+    }
+
+    return $prefixed_redirect;
 }, 10, 2);
 
 add_filter('wpseo_canonical', function($canonical) {
@@ -350,6 +404,13 @@ add_filter('rank_math/frontend/canonical', function($canonical) {
     return $canonical;
 }, 10, 1);
 
+// Prevent page caches / CDNs from caching 404 responses on translated pretty URLs
+add_action('template_redirect', function() {
+    if (defined('FT_IS_PRETTY_URL') && is_404()) {
+        nocache_headers();
+    }
+}, 999);
+
 // 4. SMART SEO REDIRECTOR
 add_action('template_redirect', 'freedomtranslate_seo_language_redirect', 1);
 
@@ -358,7 +419,7 @@ function freedomtranslate_seo_language_redirect() {
         return;
     }
 
-    $req_uri_raw = isset($_SERVER['REQUEST_URI']) ? sanitize_text_field(wp_unslash($_SERVER['REQUEST_URI'])) : '';
+    $req_uri_raw = isset($_SERVER['REQUEST_URI']) ? preg_replace('/[\x00-\x1F\x7F]/', '', wp_unslash($_SERVER['REQUEST_URI'])) : '';
     if (is_feed() || strpos($req_uri_raw, '/feed') !== false) {
         return;
     }
@@ -379,6 +440,7 @@ function freedomtranslate_seo_language_redirect() {
     if (empty($host)) {
         return;
     }
+    $site_path = isset($home_parsed['path']) ? rtrim($home_parsed['path'], '/') : '';
 
     $actual_uri = defined('FT_ORIGINAL_URI') ? FT_ORIGINAL_URI : $req_uri_raw;
 
@@ -400,18 +462,18 @@ function freedomtranslate_seo_language_redirect() {
             return;
         }
 
-        $clean_uri      = remove_query_arg('freedomtranslate_lang', $actual_uri);
+        $clean_uri = remove_query_arg('freedomtranslate_lang', $actual_uri);
+
+        if (defined('FT_IS_PRETTY_URL')) {
+            $prefix_pattern = '#^' . preg_quote($site_path . '/' . FT_IS_PRETTY_URL, '#') . '(?:/|$)#i';
+            $clean_uri      = preg_replace($prefix_pattern, $site_path . '/', $clean_uri);
+        }
+
         $clean_base_url = $scheme . $host . $clean_uri;
 
         if ($explicit_lang === $site_source_lang) {
-            if (defined('FT_IS_PRETTY_URL')) {
-                $clean_base_url = preg_replace('#^' . preg_quote($scheme . $host . '/' . FT_IS_PRETTY_URL, '#') . '/#i', $scheme . $host . '/', $clean_base_url);
-            }
             $redirect_url = $clean_base_url;
         } else {
-            if (defined('FT_IS_PRETTY_URL')) {
-                $clean_base_url = preg_replace('#^' . preg_quote($scheme . $host . '/' . FT_IS_PRETTY_URL, '#') . '/#i', $scheme . $host . '/', $clean_base_url);
-            }
             $redirect_url = freedomtranslate_inject_lang_prefix($clean_base_url, $explicit_lang);
         }
 
@@ -441,6 +503,9 @@ function freedomtranslate_seo_language_redirect() {
 
 // 5. HELPER FUNCTIONS
 function freedomtranslate_get_user_lang() {
+    if (!empty($GLOBALS['freedomtranslate_pretty_lang']) && freedomtranslate_is_language_enabled($GLOBALS['freedomtranslate_pretty_lang'])) {
+        return $GLOBALS['freedomtranslate_pretty_lang'];
+    }
     if (isset($_GET['freedomtranslate_lang']) && is_scalar($_GET['freedomtranslate_lang'])) {
         $lang = sanitize_text_field(wp_unslash($_GET['freedomtranslate_lang']));
         if (freedomtranslate_is_language_enabled($lang)) {
@@ -484,8 +549,8 @@ function freedomtranslate_get_all_languages() {
     ];
 }
 
-// Override WordPress Locale
-add_action('wp_loaded', 'freedomtranslate_force_active_locale');
+// Switch WordPress locale AFTER request parsing so localized rewrite rules never trigger 404s
+add_action('wp', 'freedomtranslate_force_active_locale', 1);
 
 function freedomtranslate_force_active_locale() {
     if (is_admin()) {
@@ -493,13 +558,15 @@ function freedomtranslate_force_active_locale() {
     }
 
     $user_lang = '';
-    if (isset($_GET['freedomtranslate_lang']) && is_scalar($_GET['freedomtranslate_lang'])) {
+    if (!empty($GLOBALS['freedomtranslate_pretty_lang'])) {
+        $user_lang = $GLOBALS['freedomtranslate_pretty_lang'];
+    } elseif (isset($_GET['freedomtranslate_lang']) && is_scalar($_GET['freedomtranslate_lang'])) {
         $user_lang = sanitize_text_field(wp_unslash($_GET['freedomtranslate_lang']));
     } elseif (isset($_COOKIE['freedomtranslate_lang'])) {
         $user_lang = sanitize_text_field(wp_unslash($_COOKIE['freedomtranslate_lang']));
     }
 
-    if (empty($user_lang)) {
+    if (empty($user_lang) || !freedomtranslate_is_language_enabled($user_lang)) {
         return;
     }
 
@@ -1600,7 +1667,7 @@ function freedomtranslate_filter_post_content($content, $id = null) {
                 ));
             }
 
-            if ($db_explicit) {
+            if ($db_explicit && trim((string) $db_explicit->translation) !== '') {
                 if ($db_explicit->hash_key !== $active_hash) {
                     $wpdb->update($table, ['hash_key' => $active_hash], ['hash_key' => $db_explicit->hash_key]);
                 }
@@ -1627,7 +1694,7 @@ function freedomtranslate_filter_post_content($content, $id = null) {
                 ));
             }
 
-            if ($db_body) {
+            if ($db_body && trim((string) $db_body->translation) !== '') {
                 if ($current_ttl === 0 || empty($db_body->expires_at) || strtotime($db_body->expires_at . ' UTC') > time()) {
                     $res = wp_trim_words(wp_strip_all_tags(do_shortcode($db_body->translation)), 55);
                     $request_cache[$active_hash] = $res;
@@ -1667,7 +1734,8 @@ function freedomtranslate_filter_post_content($content, $id = null) {
             }
         }
 
-        if ($is_completed && $cached_translation !== false) {
+        // Always fall back to original content if translation is missing or empty
+        if ($is_completed && $cached_translation !== false && trim((string) $cached_translation) !== '') {
             $output = do_shortcode($cached_translation);
 
             if ($filter_name === 'the_content' && get_option(FREEDOMTRANSLATE_AI_LABEL_ENABLE_OPTION, '0') === '1') {
@@ -1841,11 +1909,12 @@ class FreedomTranslate_Registry_Table extends WP_List_Table {
         global $wpdb;
         $table = $wpdb->prefix . 'freedomtranslate_cache';
 
+        $site_lang    = freedomtranslate_get_site_source_lang();
         $db_jobs      = $wpdb->get_results("SELECT hash_key, post_id, target_lang FROM $table WHERE status = 'completed'");
         $unified_data = [];
 
         foreach ($db_jobs as $job) {
-            if (empty($job->post_id)) continue;
+            if (empty($job->post_id) || $job->target_lang === $site_lang) continue;
 
             $content_type = 'BODY';
             if (strpos($job->hash_key, '_the_title') !== false) $content_type = 'TITLE';
@@ -3677,13 +3746,17 @@ document.addEventListener("DOMContentLoaded", function() {
 
 // FT CRON CLEANUP & COOKIE HANDLER
 add_action('init', function() {
-    if (isset($_GET['freedomtranslate_lang']) && is_scalar($_GET['freedomtranslate_lang'])) {
+    $lang = '';
+    if (!empty($GLOBALS['freedomtranslate_pretty_lang'])) {
+        $lang = $GLOBALS['freedomtranslate_pretty_lang'];
+    } elseif (isset($_GET['freedomtranslate_lang']) && is_scalar($_GET['freedomtranslate_lang'])) {
         $lang = sanitize_text_field(wp_unslash($_GET['freedomtranslate_lang']));
-        if (freedomtranslate_is_language_enabled($lang)) {
-            $domain = defined('COOKIE_DOMAIN') ? COOKIE_DOMAIN : '';
-            setcookie('freedomtranslate_lang', $lang, time() + (DAY_IN_SECONDS * 30), '/', $domain, is_ssl(), false);
-            $_COOKIE['freedomtranslate_lang'] = $lang;
-        }
+    }
+
+    if (!empty($lang) && freedomtranslate_is_language_enabled($lang)) {
+        $domain = defined('COOKIE_DOMAIN') ? COOKIE_DOMAIN : '';
+        setcookie('freedomtranslate_lang', $lang, time() + (DAY_IN_SECONDS * 30), '/', $domain, is_ssl(), false);
+        $_COOKIE['freedomtranslate_lang'] = $lang;
     }
 });
 
@@ -4032,7 +4105,6 @@ add_action('wp_ajax_freedomtranslate_queue_pause', function() {
     freedomtranslate_remove_crons_by_hash($hash_key);
     wp_send_json_success();
 });
-
 add_action('wp_ajax_freedomtranslate_queue_cancel', function() {
     check_ajax_referer('freedomtranslate_queue_action', 'nonce');
     if (!current_user_can('manage_options')) {
@@ -4271,6 +4343,7 @@ function freedomtranslate_manual_editor_html($post) {
     </script>
     <?php
 }
+
 add_action('wp_ajax_freedomtranslate_get_manual_translation', function() {
     check_ajax_referer('freedomtranslate_manual_editor_nonce', 'nonce');
 
