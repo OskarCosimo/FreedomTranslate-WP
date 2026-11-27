@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate with AI or remote URL with API + custom database cache, role-based credits system, and static strings manager.
-Version: 2.4.0
+Version: 2.4.1
 Author: thefreedom
 Text Domain: freedomtranslate-wp
 Requires at least: 5.8
@@ -32,6 +32,9 @@ define('FREEDOMTRANSLATE_MAX_CONCURRENT_OPTION',        'freedomtranslate_max_co
 define('FREEDOMTRANSLATE_PREWARM_OPTION',               'freedomtranslate_prewarm_on_save');
 define('FREEDOMTRANSLATE_CHUNK_SIZE_OPTION',            'freedomtranslate_chunk_size');
 define('FREEDOMTRANSLATE_NUM_CTX_OPTION',               'freedomtranslate_num_ctx');
+define('FREEDOMTRANSLATE_OPENAI_MODEL_OPTION',         'freedomtranslate_openai_model');
+define('FREEDOMTRANSLATE_OPENAI_MAX_TOKENS_OPTION',    'freedomtranslate_openai_max_tokens');
+define('FREEDOMTRANSLATE_OPENAI_DISABLE_THINK_OPTION', 'freedomtranslate_openai_disable_think');
 define('FREEDOMTRANSLATE_SEO_PERMALINKS_OPTION',        'freedomtranslate_seo_permalinks');
 define('FREEDOMTRANSLATE_AI_LABEL_ENABLE_OPTION',       'freedomtranslate_ai_label_enable');
 define('FREEDOMTRANSLATE_AI_LABEL_TEXT_OPTION',         'freedomtranslate_ai_label_text');
@@ -1219,12 +1222,118 @@ function freedomtranslate_translate_ollama($text, $source, $target, $format = 't
     return new WP_Error('apierror', 'Missing response from Ollama API');
 }
 
+/**
+ * Native OpenAI-compatible Chat Completions integration (OpenAI, MLX-LM, LM Studio, vLLM).
+ */
+function freedomtranslate_translate_openai($text, $source, $target, $format = 'text', $job_id = '', $temperature = 0.1) {
+    $api_url = get_option(FREEDOMTRANSLATE_API_URL_OPTION, 'https://api.openai.com/v1/chat/completions');
+
+    // Auto-complete standard OpenAI Chat Completions endpoint if only base host or /v1 is provided
+    $lower_url = strtolower($api_url);
+    if (strpos($lower_url, '/chat/completions') === false) {
+        $trimmed = rtrim($api_url, '/');
+        if (substr(strtolower($trimmed), -3) === '/v1') {
+            $api_url = $trimmed . '/chat/completions';
+        } else {
+            $api_url = $trimmed . '/v1/chat/completions';
+        }
+    }
+
+    $api_key    = trim((string) get_option(FREEDOMTRANSLATE_API_KEY_OPTION, ''));
+    $model_name = get_option(FREEDOMTRANSLATE_OPENAI_MODEL_OPTION, 'mlx-community/gemma-4-12B-it-4bit');
+    $timeout    = (int) get_option('freedomtranslate_api_timeout', 120);
+
+    $lang_map = [
+        'ar' => 'Arabic',     'az' => 'Azerbaijani', 'bg' => 'Bulgarian',  'zh' => 'Chinese',
+        'cs' => 'Czech',      'da' => 'Danish',      'nl' => 'Dutch',      'en' => 'English',
+        'fi' => 'Finnish',    'fr' => 'French',      'de' => 'German',     'el' => 'Greek',
+        'he' => 'Hebrew',     'hi' => 'Hindi',       'hu' => 'Hungarian',  'id' => 'Indonesian',
+        'ga' => 'Irish',      'it' => 'Italian',     'ja' => 'Japanese',   'ko' => 'Korean',
+        'no' => 'Norwegian',  'pl' => 'Polish',      'pt' => 'Portuguese', 'ro' => 'Romanian',
+        'ru' => 'Russian',    'sk' => 'Slovak',      'es' => 'Spanish',    'sv' => 'Swedish',
+        'th' => 'Thai',       'tr' => 'Turkish',     'uk' => 'Ukrainian',  'vi' => 'Vietnamese'
+    ];
+
+    $full_source = isset($lang_map[strtolower($source)]) ? $lang_map[strtolower($source)] : $source;
+    $full_target = isset($lang_map[strtolower($target)]) ? $lang_map[strtolower($target)] : $target;
+
+    if ($format === 'html') {
+        $prompt = "/no_think\n" .
+                  "You are a direct translation engine. DO NOT THINK. DO NOT USE THINK TAGS.\n" .
+                  "Translate ALL visible text (including quoted text and text inside <em>, <strong>, <a>) in the following HTML from {$full_source} to {$full_target}.\n" .
+                  "CRITICAL RULES:\n" .
+                  "- Translate 100% of the {$full_source} prose into {$full_target}. NEVER return untranslated {$full_source} sentences.\n" .
+                  "- Preserve all HTML tags, attributes (href, src, class, id), spaces around inline tags, and placeholder tokens like [[FTWP_0]], [[FTSC_0]], [[FTSPB0]], [PH_...] untouched.\n" .
+                  "- Return ONLY the translated HTML.\n\n" .
+                  "HTML to translate:\n{$text}";
+    } else {
+        $prompt = "/no_think\n" .
+                  "You are a direct translation engine. DO NOT THINK. DO NOT USE THINK TAGS.\n" .
+                  "Translate from {$full_source} to {$full_target}.\n" .
+                  "CRITICAL RULE: Provide ONLY the translated {$full_target} text. NO explanations. NO introductions.\n\n" .
+                  "Text to translate:\n{$text}";
+    }
+
+    $configured_max = max(64, (int) get_option(FREEDOMTRANSLATE_OPENAI_MAX_TOKENS_OPTION, 4096));
+    $actual_len     = function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') : strlen($text);
+    $max_tokens     = max($configured_max, min(16384, $actual_len + 1000));
+
+    $payload = [
+        'model'       => $model_name,
+        'messages'    => [
+            ['role' => 'user', 'content' => $prompt]
+        ],
+        'stream'      => false,
+        'temperature' => $temperature,
+        'top_p'       => 0.9,
+        'max_tokens'  => $max_tokens,
+    ];
+
+    // Send chat_template_kwargs for local MLX-LM/vLLM servers, but omit on official api.openai.com to prevent 400 errors
+    $parsed_host        = wp_parse_url($api_url, PHP_URL_HOST);
+    $is_official_openai = ($parsed_host && strcasecmp($parsed_host, 'api.openai.com') === 0);
+    if (!$is_official_openai && get_option(FREEDOMTRANSLATE_OPENAI_DISABLE_THINK_OPTION, '1') === '1') {
+        $payload['chat_template_kwargs'] = ['enable_thinking' => false];
+    }
+
+    $headers = ['Content-Type' => 'application/json'];
+    if ($api_key !== '') {
+        $headers['Authorization'] = 'Bearer ' . $api_key;
+    }
+
+    $response = wp_remote_post($api_url, [
+        'headers' => $headers,
+        'body'    => wp_json_encode($payload),
+        'timeout' => $timeout,
+    ]);
+
+    if (is_wp_error($response)) {
+        return $response;
+    }
+
+    $status_code = (int) wp_remote_retrieve_response_code($response);
+    $json        = json_decode(wp_remote_retrieve_body($response), true);
+
+    if ($status_code >= 400 || isset($json['error'])) {
+        $err_msg = isset($json['error']['message']) ? $json['error']['message'] : ('HTTP ' . $status_code);
+        return new WP_Error('apierror', 'OpenAI Engine error: ' . $err_msg);
+    }
+
+    if (isset($json['choices'][0]['message']['content'])) {
+        return freedomtranslate_clean_ollama_translation($json['choices'][0]['message']['content']);
+    }
+
+    return new WP_Error('apierror', 'Missing content from OpenAI-compatible API');
+}
+
 function freedomtranslate_do_api_translation($text, $source, $target, $format = 'text', $job_id = '', $temperature = 0.1) {
     $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
     if ($service === 'google_official') {
         return freedomtranslate_translate_google_official($text, $source, $target, $format);
     } elseif ($service === 'ollama') {
         return freedomtranslate_translate_ollama($text, $source, $target, $format, $job_id, $temperature);
+    } elseif ($service === 'openai') {
+        return freedomtranslate_translate_openai($text, $source, $target, $format, $job_id, $temperature);
     } else {
         return freedomtranslate_translate_libre($text, $source, $target, $format, $job_id);
     }
@@ -1533,7 +1642,7 @@ function freedomtranslate_async_worker($hash_key, $site_lang, $user_lang, $post_
     }
 
     $service              = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
-    $use_notranslate_span = ($service !== 'ollama');
+    $use_notranslate_span = !in_array($service, ['ollama', 'openai'], true);
     $chunk_size           = (int) get_option(FREEDOMTRANSLATE_CHUNK_SIZE_OPTION, 500);
 
     $raw_chunks   = freedomtranslate_split_html_into_chunks($source_text, $chunk_size);
@@ -2996,6 +3105,16 @@ function freedomtranslate_settings_page() {
         $disable_think = isset($_POST['freedomtranslate_ollama_disable_think']) ? '1' : '0';
         update_option('freedomtranslate_ollama_disable_think', $disable_think);
 
+        if (isset($_POST['freedomtranslate_openai_model'])) {
+    update_option(FREEDOMTRANSLATE_OPENAI_MODEL_OPTION, sanitize_text_field(wp_unslash($_POST['freedomtranslate_openai_model'])));
+}
+if (isset($_POST['freedomtranslate_openai_max_tokens'])) {
+    $openai_max_tokens = max(64, min(32768, absint(wp_unslash($_POST['freedomtranslate_openai_max_tokens']))));
+    update_option(FREEDOMTRANSLATE_OPENAI_MAX_TOKENS_OPTION, $openai_max_tokens);
+}
+$openai_disable_think = isset($_POST['freedomtranslate_openai_disable_think']) ? '1' : '0';
+update_option(FREEDOMTRANSLATE_OPENAI_DISABLE_THINK_OPTION, $openai_disable_think);
+
         $prewarm = isset($_POST['freedomtranslate_prewarm_on_save']) ? '1' : '0';
         update_option('freedomtranslate_prewarm_on_save', $prewarm);
 
@@ -3227,6 +3346,7 @@ function freedomtranslate_settings_page() {
                         <th scope="row"><?php esc_html_e('Translation Service', 'freedomtranslate-wp'); ?></th>
                         <td>
                             <label><input type="radio" name="translation_service" value="ollama" onchange="ftToggleServiceUI()" <?php checked($current_service, 'ollama'); ?>> Ollama (Local AI Server)</label><br>
+                            <label><input type="radio" name="translation_service" value="openai" onchange="ftToggleServiceUI()" <?php checked($current_service, 'openai'); ?>> OpenAI Engine (OpenAI / MLX-LM / LM Studio / vLLM)</label><br>
                             <label><input type="radio" name="translation_service" value="libretranslate" onchange="ftToggleServiceUI()" <?php checked($current_service, 'libretranslate'); ?>> LibreTranslate API</label><br>
                             <label><input type="radio" name="translation_service" value="google_official" onchange="ftToggleServiceUI()" <?php checked($current_service, 'google_official'); ?>> Google Translate Official API</label><br>
                             <label><input type="radio" name="translation_service" value="googlehash" onchange="ftToggleServiceUI()" <?php checked($current_service, 'googlehash'); ?>> Google Hash (Free/On-the-fly)</label>
@@ -3237,7 +3357,7 @@ function freedomtranslate_settings_page() {
                         <th scope="row"><label for="freedomtranslate_api_url"><?php esc_html_e('API Server URL', 'freedomtranslate-wp'); ?></label></th>
                         <td>
                             <input type="text" id="freedomtranslate_api_url" name="freedomtranslate_api_url" value="<?php echo esc_attr($api_url); ?>" class="regular-text">
-                            <p class="description">Ollama default: http://localhost:11434 | LibreTranslate default: http://localhost:5000/translate</p>
+                            <p class="description">Ollama: http://localhost:11434 | OpenAI / MLX-LM: http://localhost:11435/v1/chat/completions | LibreTranslate: http://localhost:5000/translate</p>
                         </td>
                     </tr>
                     <tr valign="top" class="ft-row-shared">
@@ -3275,6 +3395,31 @@ function freedomtranslate_settings_page() {
                                 <strong>Send <code>'think': false</code> in API payload</strong>
                             </label>
                             <p class="description"><?php esc_html_e('Useful for modern reasoning models to suppress internal "Chain of Thought" outputs during translation.', 'freedomtranslate-wp'); ?></p>
+                        </td>
+                    </tr>
+
+                    <tr valign="top" class="ft-openai-only">
+                        <th scope="row"><label for="freedomtranslate_openai_model"><?php esc_html_e('OpenAI / MLX Model', 'freedomtranslate-wp'); ?></label></th>
+                        <td>
+                            <input type="text" id="freedomtranslate_openai_model" name="freedomtranslate_openai_model" value="<?php echo esc_attr(get_option(FREEDOMTRANSLATE_OPENAI_MODEL_OPTION, 'mlx-community/gemma-4-12B-it-4bit')); ?>" class="regular-text">
+                            <p class="description"><?php esc_html_e('Examples: mlx-community/gemma-4-12B-it-4bit, gpt-4o-mini, or your local LM Studio/vLLM model ID.', 'freedomtranslate-wp'); ?></p>
+                        </td>
+                    </tr>
+                    <tr valign="top" class="ft-openai-only">
+                        <th scope="row"><label for="freedomtranslate_openai_max_tokens"><?php esc_html_e('Max Tokens', 'freedomtranslate-wp'); ?></label></th>
+                        <td>
+                            <input type="number" id="freedomtranslate_openai_max_tokens" name="freedomtranslate_openai_max_tokens" value="<?php echo esc_attr(get_option(FREEDOMTRANSLATE_OPENAI_MAX_TOKENS_OPTION, 4096)); ?>" min="64" max="32768" class="small-text">
+                        </td>
+                    </tr>
+                    <tr valign="top" class="ft-openai-only">
+                        <th scope="row"><?php esc_html_e('Disable AI Thinking (MLX / vLLM)', 'freedomtranslate-wp'); ?></th>
+                        <td>
+                            <label>
+                                <?php $openai_disable_think_val = get_option(FREEDOMTRANSLATE_OPENAI_DISABLE_THINK_OPTION, '1'); ?>
+                                <input type="checkbox" name="freedomtranslate_openai_disable_think" value="1" <?php checked($openai_disable_think_val, '1'); ?>>
+                                <strong>Send <code>"chat_template_kwargs": {"enable_thinking": false}</code></strong>
+                            </label>
+                            <p class="description"><?php esc_html_e('Recommended for MLX-LM / vLLM reasoning models (e.g., Gemma 4, Qwen 3). Automatically skipped if the URL points to api.openai.com.', 'freedomtranslate-wp'); ?></p>
                         </td>
                     </tr>
                 </table>
@@ -3388,30 +3533,34 @@ function freedomtranslate_settings_page() {
 
             <script type="text/javascript">
             function ftToggleServiceUI() {
-                var selectedRadio = document.querySelector('input[name="translation_service"]:checked');
-                if (!selectedRadio) return;
-                var service = selectedRadio.value;
+    var selectedRadio = document.querySelector('input[name="translation_service"]:checked');
+    if (!selectedRadio) return;
+    var service = selectedRadio.value;
 
-                var blockGoogle = document.getElementById('ui_block_google_official');
-                var blockHash = document.getElementById('ui_block_googlehash');
-                var blockAuto = document.getElementById('ui_block_automation');
+    var blockGoogle = document.getElementById('ui_block_google_official');
+    var blockHash = document.getElementById('ui_block_googlehash');
+    var blockAuto = document.getElementById('ui_block_automation');
 
-                if (blockGoogle) blockGoogle.style.display = (service === 'google_official') ? 'block' : 'none';
-                if (blockHash) blockHash.style.display = (service === 'googlehash') ? 'block' : 'none';
-                if (blockAuto) blockAuto.style.display = (service === 'googlehash') ? 'none' : 'block';
+    if (blockGoogle) blockGoogle.style.display = (service === 'google_official') ? 'block' : 'none';
+    if (blockHash) blockHash.style.display = (service === 'googlehash') ? 'block' : 'none';
+    if (blockAuto) blockAuto.style.display = (service === 'googlehash') ? 'none' : 'block';
 
-                document.querySelectorAll('.ft-ollama-only').forEach(function(row) {
-                    row.style.display = (service === 'ollama') ? 'table-row' : 'none';
-                });
+    document.querySelectorAll('.ft-ollama-only').forEach(function(row) {
+        row.style.display = (service === 'ollama') ? 'table-row' : 'none';
+    });
 
-                document.querySelectorAll('.ft-row-shared').forEach(function(row) {
-                    row.style.display = (service === 'ollama' || service === 'libretranslate') ? 'table-row' : 'none';
-                });
+    document.querySelectorAll('.ft-openai-only').forEach(function(row) {
+        row.style.display = (service === 'openai') ? 'table-row' : 'none';
+    });
 
-                document.querySelectorAll('.ft-processing-limit').forEach(function(row) {
-                    row.style.display = (service === 'ollama' || service === 'libretranslate' || service === 'google_official') ? 'table-row' : 'none';
-                });
-            }
+    document.querySelectorAll('.ft-row-shared').forEach(function(row) {
+        row.style.display = (service === 'ollama' || service === 'libretranslate' || service === 'openai') ? 'table-row' : 'none';
+    });
+
+    document.querySelectorAll('.ft-processing-limit').forEach(function(row) {
+        row.style.display = (service === 'ollama' || service === 'libretranslate' || service === 'google_official' || service === 'openai') ? 'table-row' : 'none';
+    });
+}
 
             document.addEventListener("DOMContentLoaded", function() {
                 ftToggleServiceUI();
@@ -4252,7 +4401,7 @@ add_action('save_post', function($post_id) {
     if (!$post || $post->post_status !== 'publish') return;
 
     $service = get_option(FREEDOMTRANSLATE_TRANSLATION_SERVICE_OPTION, 'libretranslate');
-    if (!in_array($service, ['libretranslate', 'ollama', 'google_official'], true)) return;
+    if (!in_array($service, ['libretranslate', 'ollama', 'google_official', 'openai'], true)) return;
 
     $acting_user_id = get_current_user_id();
     if (!$acting_user_id) {
