@@ -2,7 +2,7 @@
 /*
 Plugin Name: FreedomTranslate WP
 Description: Translate with AI or remote URL with API + custom database cache, role-based credits system, and static strings manager.
-Version: 2.4.1
+Version: 2.4.2
 Author: thefreedom
 Text Domain: freedomtranslate-wp
 Requires at least: 5.8
@@ -45,6 +45,7 @@ define('FREEDOMTRANSLATE_CREDITS_GLOBAL_LIMIT_OPTION',  'freedomtranslate_credit
 define('FREEDOMTRANSLATE_CREDITS_PERIOD_OPTION',        'freedomtranslate_credits_period');
 define('FREEDOMTRANSLATE_ALLOWED_ROLES_OPTION',         'freedomtranslate_allowed_roles');
 define('FREEDOMTRANSLATE_ALLOW_EDITOR_STRINGS_OPTION',  'freedomtranslate_allow_editor_strings');
+define('FREEDOMTRANSLATE_CREDITS_STRING_COST_OPTION',   'freedomtranslate_credits_string_cost');
 
 /**
  * Determine the true site source language reliably without being affected by user locale or switch_to_locale().
@@ -300,6 +301,14 @@ function freedomtranslate_get_current_credit_period_data() {
 }
 
 /**
+ * Format credit numbers cleanly (e.g. 50.00 -> 50, 49.40 -> 49.4).
+ */
+function freedomtranslate_format_credits($value) {
+    $formatted = number_format(round((float) $value, 2), 2, '.', '');
+    return rtrim(rtrim($formatted, '0'), '.');
+}
+
+/**
  * Retrieve credit balance and limit information for a specific user, performing lazy automatic period resets.
  *
  * @param int $user_id WordPress User ID.
@@ -310,28 +319,29 @@ function freedomtranslate_get_user_credits_info($user_id) {
     $enabled = (get_option(FREEDOMTRANSLATE_CREDITS_ENABLED_OPTION, '1') === '1');
 
     $period_data  = freedomtranslate_get_current_credit_period_data();
-    $global_limit = max(0, (int) get_option(FREEDOMTRANSLATE_CREDITS_GLOBAL_LIMIT_OPTION, 50));
+    $global_limit = round(max(0.0, (float) get_option(FREEDOMTRANSLATE_CREDITS_GLOBAL_LIMIT_OPTION, 50)), 2);
 
     $custom_raw = get_user_meta($user_id, '_freedomtranslate_credits_custom_limit', true);
     $is_custom  = ($custom_raw !== '' && $custom_raw !== false);
-    $limit      = $is_custom ? intval($custom_raw) : $global_limit;
+    $limit      = $is_custom ? round((float) $custom_raw, 2) : $global_limit;
 
     $stored_key = (string) get_user_meta($user_id, '_freedomtranslate_credits_period_key', true);
-    $used       = (int) get_user_meta($user_id, '_freedomtranslate_credits_used', true);
+    $used       = round(max(0.0, (float) get_user_meta($user_id, '_freedomtranslate_credits_used', true)), 2);
 
     // Lazy automatic reset when entering a new period
     if ($stored_key !== $period_data['period_key']) {
-        $used = 0;
+        $used = 0.0;
         if ($user_id > 0) {
             update_user_meta($user_id, '_freedomtranslate_credits_used', 0);
             update_user_meta($user_id, '_freedomtranslate_credits_period_key', $period_data['period_key']);
         }
     }
 
-    if (!$enabled || $limit === -1) {
-        $remaining = -1; // Unlimited
+    if (!$enabled || $limit <= -1.0) {
+        $limit     = ($limit <= -1.0) ? -1.0 : $limit;
+        $remaining = -1.0; // Unlimited
     } else {
-        $remaining = max(0, $limit - $used);
+        $remaining = round(max(0.0, $limit - $used), 2);
     }
 
     return [
@@ -348,17 +358,17 @@ function freedomtranslate_get_user_credits_info($user_id) {
 
 /**
  * Atomically check and consume translation credits for a user.
- * 1 credit = 1 target language translation for a post.
+ * Supports fractional amounts (e.g., 1 for posts, 0.2 for static strings).
  *
- * @param int $user_id WordPress User ID.
- * @param int $amount  Number of credits to consume.
+ * @param int   $user_id WordPress User ID.
+ * @param float $amount  Number of credits to consume.
  * @return bool True on success, false if insufficient credits.
  */
-function freedomtranslate_consume_user_credits($user_id, $amount = 1) {
+function freedomtranslate_consume_user_credits($user_id, $amount = 1.0) {
     $user_id = intval($user_id);
-    $amount  = max(1, intval($amount));
+    $amount  = round((float) $amount, 2);
 
-    if (get_option(FREEDOMTRANSLATE_CREDITS_ENABLED_OPTION, '1') !== '1') {
+    if (get_option(FREEDOMTRANSLATE_CREDITS_ENABLED_OPTION, '1') !== '1' || $amount <= 0.0) {
         return true;
     }
     if ($user_id <= 0) {
@@ -381,17 +391,18 @@ function freedomtranslate_consume_user_credits($user_id, $amount = 1) {
 
     $info = freedomtranslate_get_user_credits_info($user_id);
 
-    if ($info['limit'] === -1) {
+    if ($info['limit'] == -1.0) {
         if ($locked) delete_transient($lock_name);
         return true;
     }
 
-    if ($info['remaining'] < $amount) {
+    if (round($info['remaining'], 2) < $amount) {
         if ($locked) delete_transient($lock_name);
         return false;
     }
 
-    update_user_meta($user_id, '_freedomtranslate_credits_used', $info['used'] + $amount);
+    $new_used = round($info['used'] + $amount, 2);
+    update_user_meta($user_id, '_freedomtranslate_credits_used', $new_used);
     update_user_meta($user_id, '_freedomtranslate_credits_period_key', $info['period_key']);
 
     if ($locked) {
@@ -2545,11 +2556,11 @@ class FreedomTranslate_Users_Credits_Table extends WP_List_Table {
                     : '<span style="background:#72777c;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;">' . esc_html__('No Access', 'freedomtranslate-wp') . '</span>';
                 return esc_html(implode(', ', $item['role_names'])) . '<br>' . $access_badge;
             case 'usage':
-                $limit_label = ($credits['limit'] === -1) ? __('Unlimited', 'freedomtranslate-wp') : intval($credits['limit']);
-                $rem_label   = ($credits['remaining'] === -1) ? __('Unlimited', 'freedomtranslate-wp') : intval($credits['remaining']);
+                $limit_label = ($credits['limit'] == -1.0) ? __('Unlimited', 'freedomtranslate-wp') : freedomtranslate_format_credits($credits['limit']);
+                $rem_label   = ($credits['remaining'] == -1.0) ? __('Unlimited', 'freedomtranslate-wp') : freedomtranslate_format_credits($credits['remaining']);
                 return sprintf(
-                    '<strong>%d</strong> / %s<br><small>%s: %s</small>',
-                    intval($credits['used']),
+                    '<strong>%s</strong> / %s<br><small>%s: %s</small>',
+                    esc_html(freedomtranslate_format_credits($credits['used'])),
                     esc_html((string) $limit_label),
                     esc_html__('Remaining', 'freedomtranslate-wp'),
                     esc_html((string) $rem_label)
@@ -2559,7 +2570,7 @@ class FreedomTranslate_Users_Credits_Table extends WP_List_Table {
                 $html  = '<form method="post" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">';
                 $html .= '<input type="hidden" name="ft_credit_user_id" value="' . esc_attr($user_id) . '">';
                 $html .= '<input type="hidden" name="ft_credit_nonce" value="' . esc_attr($nonce_val) . '">';
-                $html .= '<input type="number" name="ft_user_custom_limit" value="' . esc_attr($custom_val) . '" min="-1" placeholder="' . esc_attr__('Global', 'freedomtranslate-wp') . '" style="width:90px;">';
+                $html .= '<input type="number" name="ft_user_custom_limit" value="' . esc_attr($custom_val) . '" min="-1" step="0.1" placeholder="' . esc_attr__('Global', 'freedomtranslate-wp') . '" style="width:90px;">';
                 $html .= '<button type="submit" name="freedomtranslate_update_user_credit" class="button button-small button-primary">' . esc_html__('Save', 'freedomtranslate-wp') . '</button>';
                 $html .= '<button type="submit" name="freedomtranslate_reset_user_credit" class="button button-small" onclick="return confirm(\'' . esc_js(__('Reset used credits to 0 for this user?', 'freedomtranslate-wp')) . '\');">' . esc_html__('Reset Used', 'freedomtranslate-wp') . '</button>';
                 $html .= '</form>';
@@ -2641,6 +2652,32 @@ add_action('admin_init', function() {
         $text = isset($_POST['new_string_text']) ? sanitize_textarea_field(wp_unslash($_POST['new_string_text'])) : '';
 
         if (!empty($id) && !empty($text)) {
+            $text_len = function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') : strlen($text);
+            if ($text_len > 500) {
+                wp_safe_redirect(admin_url('admin.php?page=freedomtranslate&tab=static_strings&ft_msg=string_too_long'));
+                exit;
+            }
+
+            $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
+            $site_lang     = freedomtranslate_get_site_source_lang();
+            $target_langs  = [];
+
+            if (is_array($enabled_langs)) {
+                foreach ($enabled_langs as $lang) {
+                    if ($lang !== $site_lang) {
+                        $target_langs[] = $lang;
+                    }
+                }
+            }
+
+            $string_cost    = round(max(0.0, (float) get_option(FREEDOMTRANSLATE_CREDITS_STRING_COST_OPTION, 0.2)), 2);
+            $needed_credits = round(count($target_langs) * $string_cost, 2);
+
+            if ($needed_credits > 0 && !freedomtranslate_consume_user_credits(get_current_user_id(), $needed_credits)) {
+                wp_safe_redirect(admin_url('admin.php?page=freedomtranslate&tab=static_strings&ft_msg=insufficient_credits'));
+                exit;
+            }
+
             $lock_name = 'freedomtranslate_lock_static_strings';
             $locked    = false;
             $attempts  = 0;
@@ -2664,16 +2701,10 @@ add_action('admin_init', function() {
             update_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, $strings);
             if ($locked) delete_transient($lock_name);
 
-            $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
-            $site_lang     = freedomtranslate_get_site_source_lang();
-
             $delay = 0;
-            if (is_array($enabled_langs)) {
-                foreach ($enabled_langs as $lang) {
-                    if ($lang === $site_lang) continue;
-                    wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, uniqid('', true)]);
-                    $delay += 15;
-                }
+            foreach ($target_langs as $lang) {
+                wp_schedule_single_event(time() + $delay, 'freedomtranslate_async_string_translate', [$id, $text, $site_lang, $lang, uniqid('', true)]);
+                $delay += 15;
             }
 
             wp_safe_redirect(admin_url('admin.php?page=freedomtranslate&tab=static_strings&ft_msg=string_saved'));
@@ -2704,7 +2735,7 @@ add_action('admin_init', function() {
             if ($raw_limit === '') {
                 delete_user_meta($target_uid, '_freedomtranslate_credits_custom_limit');
             } else {
-                $val = max(-1, intval($raw_limit));
+                $val = ($raw_limit === '-1' || (float) $raw_limit < 0) ? -1 : round((float) $raw_limit, 2);
                 update_user_meta($target_uid, '_freedomtranslate_credits_custom_limit', (string) $val);
             }
             wp_safe_redirect(esc_url_raw(add_query_arg('ft_msg', 'user_credit_saved', $clean_url)));
@@ -2770,18 +2801,23 @@ add_action('admin_init', function() {
             if (isset($strings[$id])) {
                 $text          = $strings[$id]['original'];
                 $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
-                $delay         = 0;
+                $target_langs  = is_array($enabled_langs) ? array_values(array_filter($enabled_langs, function($l) use ($site_lang) { return $l !== $site_lang; })) : [];
+                $string_cost   = round(max(0.0, (float) get_option(FREEDOMTRANSLATE_CREDITS_STRING_COST_OPTION, 0.2)), 2);
+                $needed        = round(count($target_langs) * $string_cost, 2);
 
-                if (is_array($enabled_langs)) {
-                    foreach ($enabled_langs as $lang) {
-                        if ($lang === $site_lang) continue;
-                        wp_schedule_single_event(
-                            time() + $delay,
-                            'freedomtranslate_async_string_translate',
-                            [$id, $text, $site_lang, $lang, uniqid('', true)]
-                        );
-                        $delay += 15;
-                    }
+                if ($needed > 0 && !freedomtranslate_consume_user_credits(get_current_user_id(), $needed)) {
+                    wp_safe_redirect(esc_url_raw(add_query_arg('ft_msg', 'insufficient_credits', $clean_url)));
+                    exit;
+                }
+
+                $delay = 0;
+                foreach ($target_langs as $lang) {
+                    wp_schedule_single_event(
+                        time() + $delay,
+                        'freedomtranslate_async_string_translate',
+                        [$id, $text, $site_lang, $lang, uniqid('', true)]
+                    );
+                    $delay += 15;
                 }
             }
             wp_safe_redirect(esc_url_raw(add_query_arg('ft_msg', 'retranslated', $clean_url)));
@@ -2899,20 +2935,27 @@ add_action('admin_init', function() {
             $strings       = get_option(FREEDOMTRANSLATE_STATIC_STRINGS_OPTION, []);
             $enabled_langs = get_option(FREEDOMTRANSLATE_LANGUAGES_OPTION, []);
             $site_lang     = freedomtranslate_get_site_source_lang();
-            $delay         = 0;
+            $target_langs  = is_array($enabled_langs) ? array_values(array_filter($enabled_langs, function($l) use ($site_lang) { return $l !== $site_lang; })) : [];
 
-            foreach ($ids as $id) {
-                if (isset($strings[$id]) && is_array($enabled_langs)) {
-                    $text = $strings[$id]['original'];
-                    foreach ($enabled_langs as $lang) {
-                        if ($lang === $site_lang) continue;
-                        wp_schedule_single_event(
-                            time() + $delay,
-                            'freedomtranslate_async_string_translate',
-                            [$id, $text, $site_lang, $lang, uniqid('', true)]
-                        );
-                        $delay += 15;
-                    }
+            $valid_ids = array_values(array_filter($ids, function($id) use ($strings) { return isset($strings[$id]); }));
+            $string_cost = round(max(0.0, (float) get_option(FREEDOMTRANSLATE_CREDITS_STRING_COST_OPTION, 0.2)), 2);
+            $needed      = round(count($valid_ids) * count($target_langs) * $string_cost, 2);
+
+            if ($needed > 0 && !freedomtranslate_consume_user_credits(get_current_user_id(), $needed)) {
+                wp_safe_redirect(esc_url_raw(add_query_arg('ft_msg', 'insufficient_credits', $clean_url)));
+                exit;
+            }
+
+            $delay = 0;
+            foreach ($valid_ids as $id) {
+                $text = $strings[$id]['original'];
+                foreach ($target_langs as $lang) {
+                    wp_schedule_single_event(
+                        time() + $delay,
+                        'freedomtranslate_async_string_translate',
+                        [$id, $text, $site_lang, $lang, uniqid('', true)]
+                    );
+                    $delay += 15;
                 }
             }
             wp_safe_redirect(esc_url_raw(add_query_arg('ft_msg', 'bulk_strings_retranslated', $clean_url)));
@@ -3003,9 +3046,9 @@ function freedomtranslate_settings_page() {
                     if (!freedomtranslate_consume_user_credits($current_user_id, $needed_credits)) {
                         $c_info = freedomtranslate_get_user_credits_info($current_user_id);
                         echo '<div class="notice notice-error"><p>' . sprintf(
-                            esc_html__('Insufficient translation credits. Required: %1$d, Remaining: %2$d.', 'freedomtranslate-wp'),
-                            intval($needed_credits),
-                            intval($c_info['remaining'])
+                            esc_html__('Insufficient translation credits. Required: %1$s, Remaining: %2$s.', 'freedomtranslate-wp'),
+                            esc_html(freedomtranslate_format_credits($needed_credits)),
+                            esc_html(freedomtranslate_format_credits($c_info['remaining']))
                         ) . '</p></div>';
                     } else {
                         $queued_count = 0;
@@ -3056,9 +3099,12 @@ function freedomtranslate_settings_page() {
             'bulk_strings_retranslated' => __('Bulk strings queued for retranslation.', 'freedomtranslate-wp'),
             'user_credit_saved'         => __('User credit limit updated.', 'freedomtranslate-wp'),
             'user_credit_reset'         => __('User credit usage reset to 0.', 'freedomtranslate-wp'),
+            'insufficient_credits' => __('Insufficient translation credits to perform this action.', 'freedomtranslate-wp'),
+            'string_too_long'      => __('Static strings cannot exceed 500 characters.', 'freedomtranslate-wp'),
         ];
         if (isset($messages[$msg])) {
-            echo '<div class="notice notice-success is-dismissible"><p>' . esc_html($messages[$msg]) . '</p></div>';
+            $notice_class = in_array($msg, ['insufficient_credits', 'string_too_long'], true) ? 'notice-error' : 'notice-success';
+            echo '<div class="notice ' . esc_attr($notice_class) . ' is-dismissible"><p>' . esc_html($messages[$msg]) . '</p></div>';
         }
     }
 
@@ -3177,6 +3223,9 @@ update_option(FREEDOMTRANSLATE_OPENAI_DISABLE_THINK_OPTION, $openai_disable_thin
 
         $global_limit = isset($_POST['freedomtranslate_credits_global_limit']) ? max(0, absint(wp_unslash($_POST['freedomtranslate_credits_global_limit']))) : 50;
         update_option(FREEDOMTRANSLATE_CREDITS_GLOBAL_LIMIT_OPTION, $global_limit);
+
+        $string_cost = isset($_POST['freedomtranslate_credits_string_cost']) ? round(max(0.0, min(10.0, (float) wp_unslash($_POST['freedomtranslate_credits_string_cost']))), 2) : 0.2;
+        update_option(FREEDOMTRANSLATE_CREDITS_STRING_COST_OPTION, $string_cost);
 
         $allowed_roles = isset($_POST['freedomtranslate_allowed_roles']) ? array_map('sanitize_key', wp_unslash((array) $_POST['freedomtranslate_allowed_roles'])) : [];
         if (!in_array('administrator', $allowed_roles, true)) {
@@ -3303,11 +3352,11 @@ update_option(FREEDOMTRANSLATE_OPENAI_DISABLE_THINK_OPTION, $openai_disable_thin
             <h1 style="margin:0;"><?php esc_html_e('FreedomTranslate', 'freedomtranslate-wp'); ?></h1>
             <div style="background:#fff; border:1px solid #ccd0d4; padding:8px 14px; border-radius:4px; font-size:13px;">
                 <strong><?php esc_html_e('Your Credits:', 'freedomtranslate-wp'); ?></strong>
-                <?php if (!$my_credits['enabled'] || $my_credits['limit'] === -1): ?>
+                <?php if (!$my_credits['enabled'] || $my_credits['limit'] == -1.0): ?>
                     <span style="color:#27ae60; font-weight:bold;"><?php esc_html_e('Unlimited', 'freedomtranslate-wp'); ?></span>
                 <?php else: ?>
                     <span style="color:<?php echo $my_credits['remaining'] > 0 ? '#2271b1' : '#d63638'; ?>; font-weight:bold;">
-                        <?php echo intval($my_credits['remaining']); ?> / <?php echo intval($my_credits['limit']); ?>
+                        <?php echo esc_html(freedomtranslate_format_credits($my_credits['remaining'])); ?> / <?php echo esc_html(freedomtranslate_format_credits($my_credits['limit'])); ?>
                     </span>
                     <span style="color:#666;">(<?php echo $my_credits['period'] === 'daily' ? esc_html__('Daily', 'freedomtranslate-wp') : esc_html__('Monthly', 'freedomtranslate-wp'); ?>)</span>
                 <?php endif; ?>
@@ -3697,6 +3746,13 @@ update_option(FREEDOMTRANSLATE_OPENAI_DISABLE_THINK_OPTION, $openai_disable_thin
                         </td>
                     </tr>
                     <tr>
+                        <th scope="row"><label for="freedomtranslate_credits_string_cost"><?php esc_html_e('Static String Cost (per language)', 'freedomtranslate-wp'); ?></label></th>
+                        <td>
+                            <input type="number" id="freedomtranslate_credits_string_cost" name="freedomtranslate_credits_string_cost" value="<?php echo esc_attr(get_option(FREEDOMTRANSLATE_CREDITS_STRING_COST_OPTION, 0.2)); ?>" min="0" max="10" step="0.1" style="width:100px;">
+                            <p class="description"><?php esc_html_e('Credits consumed per target language when translating a Static String (default: 0.2, i.e., 5 string translations = 1 post credit). Static strings are capped at 500 characters.', 'freedomtranslate-wp'); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
                         <th scope="row"><?php esc_html_e('Allowed WordPress Roles', 'freedomtranslate-wp'); ?></th>
                         <td>
                             <?php
@@ -3775,7 +3831,16 @@ update_option(FREEDOMTRANSLATE_OPENAI_DISABLE_THINK_OPTION, $openai_disable_thin
                         </tr>
                         <tr>
                             <th scope="row"><label><?php esc_html_e('Original Text (Default Language)', 'freedomtranslate-wp'); ?></label></th>
-                            <td><textarea name="new_string_text" rows="3" class="large-text" required></textarea></td>
+                            <td><textarea name="new_string_text" rows="3" maxlength="500" class="large-text" required></textarea>
+<p class="description">
+    <?php
+    $sc_cost = round(max(0.0, (float) get_option(FREEDOMTRANSLATE_CREDITS_STRING_COST_OPTION, 0.2)), 2);
+    printf(
+        esc_html__('Maximum 500 characters. Translating a static string consumes %s credit(s) per target language.', 'freedomtranslate-wp'),
+        esc_html(freedomtranslate_format_credits($sc_cost))
+    );
+    ?>
+</p></td>
                         </tr>
                     </table>
                     <p><input type="submit" name="freedomtranslate_save_static_string" class="button button-primary" value="<?php esc_attr_e('Translate in all languages & Save', 'freedomtranslate-wp'); ?>"></p>
@@ -4222,14 +4287,22 @@ document.addEventListener("DOMContentLoaded", function() {
                     <p><strong><?php esc_html_e('User:', 'freedomtranslate-wp'); ?></strong> <?php echo esc_html($current_user->display_name); ?> (<code><?php echo esc_html(implode(', ', $my_role_labels)); ?></code>)</p>
                     <?php if (!$my_credits['enabled']): ?>
                         <p><strong><?php esc_html_e('Status:', 'freedomtranslate-wp'); ?></strong> <span style="color:#27ae60; font-weight:bold;"><?php esc_html_e('Credits system disabled (Unlimited)', 'freedomtranslate-wp'); ?></span></p>
-                    <?php elseif ($my_credits['limit'] === -1): ?>
+                    <?php elseif ($my_credits['limit'] == -1.0): ?>
                         <p><strong><?php esc_html_e('Quota:', 'freedomtranslate-wp'); ?></strong> <span style="color:#27ae60; font-weight:bold;"><?php esc_html_e('Unlimited (Admin override)', 'freedomtranslate-wp'); ?></span></p>
                     <?php else: ?>
-                        <p><strong><?php esc_html_e('Used this period:', 'freedomtranslate-wp'); ?></strong> <?php echo intval($my_credits['used']); ?> / <?php echo intval($my_credits['limit']); ?> <?php echo $my_credits['is_custom'] ? '<em>(' . esc_html__('Custom limit', 'freedomtranslate-wp') . ')</em>' : '<em>(' . esc_html__('Global default', 'freedomtranslate-wp') . ')</em>'; ?></p>
-                        <p><strong><?php esc_html_e('Remaining:', 'freedomtranslate-wp'); ?></strong> <span style="font-size:16px; font-weight:bold; color:<?php echo $my_credits['remaining'] > 0 ? '#2271b1' : '#d63638'; ?>;"><?php echo intval($my_credits['remaining']); ?></span></p>
+                        <p><strong><?php esc_html_e('Used this period:', 'freedomtranslate-wp'); ?></strong> <?php echo esc_html(freedomtranslate_format_credits($my_credits['used'])); ?> / <?php echo esc_html(freedomtranslate_format_credits($my_credits['limit'])); ?> <?php echo $my_credits['is_custom'] ? '<em>(' . esc_html__('Custom limit', 'freedomtranslate-wp') . ')</em>' : '<em>(' . esc_html__('Global default', 'freedomtranslate-wp') . ')</em>'; ?></p>
+                        <p><strong><?php esc_html_e('Remaining:', 'freedomtranslate-wp'); ?></strong> <span style="font-size:16px; font-weight:bold; color:<?php echo $my_credits['remaining'] > 0 ? '#2271b1' : '#d63638'; ?>;"><?php echo esc_html(freedomtranslate_format_credits($my_credits['remaining'])); ?></span></p>
                         <p><strong><?php esc_html_e('Reset Period:', 'freedomtranslate-wp'); ?></strong> <?php echo $my_credits['period'] === 'daily' ? esc_html__('Daily', 'freedomtranslate-wp') : esc_html__('Monthly', 'freedomtranslate-wp'); ?> &mdash; <?php esc_html_e('Next reset:', 'freedomtranslate-wp'); ?> <?php echo esc_html($my_credits['next_reset']); ?></p>
                     <?php endif; ?>
-                    <p class="description" style="margin-bottom:0;"><?php esc_html_e('Cost rule: 1 credit = 1 target language translation for a post. Manual edits in the Post Editor do not consume credits.', 'freedomtranslate-wp'); ?></p>
+                    <p class="description" style="margin-bottom:0;">
+                        <?php
+                        $sc_cost = round(max(0.0, (float) get_option(FREEDOMTRANSLATE_CREDITS_STRING_COST_OPTION, 0.2)), 2);
+                        printf(
+                            esc_html__('Cost rule: 1 credit = 1 target language translation for a post; %s credit(s) = 1 target language for a Static String (max 500 chars). Manual edits in the Post Editor do not consume credits.', 'freedomtranslate-wp'),
+                            esc_html(freedomtranslate_format_credits($sc_cost))
+                        );
+                        ?>
+                    </p>
                 </div>
 
                 <div style="background:#f9f9f9; border:1px solid #ccd0d4; border-radius:4px; padding:16px;">
@@ -5087,13 +5160,13 @@ function freedomtranslate_exclude_metabox_html($post) {
         </div>
         <p class="description" style="margin-top:6px;">
             <?php
-            if (!$credits['enabled'] || $credits['limit'] === -1) {
+            if (!$credits['enabled'] || $credits['limit'] == -1.0) {
                 esc_html_e('Your Credits: Unlimited (1 credit = 1 language)', 'freedomtranslate-wp');
             } else {
                 printf(
-                    esc_html__('Your Credits: %1$d / %2$d remaining (%3$s)', 'freedomtranslate-wp'),
-                    intval($credits['remaining']),
-                    intval($credits['limit']),
+                    esc_html__('Your Credits: %1$s / %2$s remaining (%3$s)', 'freedomtranslate-wp'),
+                    esc_html(freedomtranslate_format_credits($credits['remaining'])),
+                    esc_html(freedomtranslate_format_credits($credits['limit'])),
                     $credits['period'] === 'daily' ? esc_html__('Daily', 'freedomtranslate-wp') : esc_html__('Monthly', 'freedomtranslate-wp')
                 );
             }
