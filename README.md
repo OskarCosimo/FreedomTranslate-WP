@@ -1,6 +1,6 @@
 # Freedom Translate WP
 
-**Translate your WordPress site on-the-fly using Local AI (Ollama/Flask), LibreTranslate, or Google Translate.** Includes a smart Unified Translation Queue, Direct batch translation, HTML-aware chunking, static strings management, multiple translation services, user language selection, and a comprehensive tabbed admin interface.
+**Translate your WordPress site using Local AI (Ollama / MLX-LM / LM Studio / vLLM), OpenAI, LibreTranslate, or Google Translate with background queuing and custom database caching.** Includes a smart Unified Translation Queue, Direct batch translation, role-based access control, a per-user translation credits system, HTML-aware chunking, static strings management, and a comprehensive tabbed interface.
 
 ---
 
@@ -14,15 +14,17 @@
   - [Static Strings (Headers/Footers)](#static-strings-headersfooters)
   - [Language Detection Modes](#language-detection-modes)
   - [Manual Translation Editing](#manual-translation-editing)
-  - [Exclude Posts or Pages](#exclude-posts-or-pages)
-- [Admin Panel](#admin-panel)
+  - [Exclude Posts or Pages & Target Languages](#exclude-posts-or-pages--target-languages)
+- [Admin & Workspace Panel](#admin--workspace-panel)
   - [General & API](#general--api)
   - [Languages](#languages)
-  - [Direct Translate & Queue](#direct-translate--queue)
+  - [Credits & Permissions](#credits--permissions)
+  - [Direct Translate & Queue Monitor](#direct-translate--queue-monitor)
   - [Static Strings](#static-strings)
-  - [Tools](#tools)
+  - [Tools & Database](#tools--database)
+  - [Roles & My Limits](#roles--my-limits)
 - [Supported Languages](#supported-languages)
-- [Local AI Setup (Ollama / Flask)](#local-ai-setup-ollama--flask)
+- [Local AI Setup (Ollama / MLX-LM / Flask)](#local-ai-setup-ollama--mlx-lm--flask)
 - [Google Cloud Setup](#google-cloud-setup)
 - [Notes](#notes)
 - [What's New](#whats-new)
@@ -34,34 +36,40 @@
 
 ## Features
 
-- 🌐 **Real-time translation** of all frontend content (titles, post content, home, etc.)
-- 🧠 **Local AI & Ollama Ready** - Fully optimized to work with a local Flask bridge running advanced LLMs (like Gemma 4) for private, high-quality translations.
-- 🚦 **Unified Translation Queue** - Prevents server overload! Background translations are neatly queued and processed asynchronously to protect your AI server's RAM and CPU.
-- 🎛️ **Direct Translate Panel** - Manually push specific posts or entire pages to the translation queue for batch/overnight processing.
-- ✍️ **Manual Visual Editor** - Fine-tune and correct AI translations directly from the WordPress post editor using a dedicated, safe AJAX-powered visual interface without risking your original content.
-- 🎚️ **Concurrency Control** - Set the `Max Concurrent Translations` limit to dictate exactly how many tasks hit your AI server at once.
-- 🚀 **Auto-Translate on Save (Pre-warming)** - Automatically queues and translates posts in the background for all enabled languages the moment you publish or update them (can be disabled for Strict Manual Mode).
-- 🛡️ **Advanced HTML Chunking** - Safely translates massive WordPress posts by splitting them into smart chunks, preserving all HTML tags and shortcodes intact.
-- 🧩 **Static Strings Manager** - Translate headers, footers, and widgets once, and display them dynamically using the `[ft_string id="..."]` shortcode.
+- ⚡ **Zero On-Visit Overhead (Read-Only Frontend)** - Frontend page visits only read completed translations from the custom database cache. No live API calls or background jobs are triggered by site visitors or bots.
+- 🧠 **Native Ollama & OpenAI / MLX-LM Ready** - Connects directly to **Ollama** (`/api/generate`) or any **OpenAI-compatible** endpoint (`/v1/chat/completions`) such as **Apple MLX-LM**, **LM Studio**, **vLLM**, and **OpenAI** (with Bearer authentication, `max_tokens`, and optional `chat_template_kwargs.enable_thinking = false` for local reasoning models).
+- 💳 **Per-User Credits / Quota System** - Admin-only configurable credit limits (`1 credit = 1 target language translation for a post`) with automatic **Daily** or **Monthly** resets, global default limits, and per-user overrides (including `-1` for Unlimited).
+- 👥 **Role-Based Access Control (RBAC)** - Supports Administrators, Editors, Moderators, Authors, and custom WordPress roles. Non-admin users can access *Direct Translate* and *Queue Monitor* scoped strictly to posts they can edit (`edit_post`).
+- 🌐 **Author Language Restrictions** - Administrators can choose which enabled languages are selectable by writers in the Post Editor metabox and *Direct Translate*.
+- 🚦 **Unified Translation Queue** - Background translations are queued and processed asynchronously via WP-Cron to protect your AI server's RAM and CPU.
+- 🎛️ **Direct Translate Panel** - Manually push specific posts or pages to the translation queue for batch processing without relying on *Auto-Translate on Save*.
+- ✍️ **Manual Visual Editor** - Fine-tune and correct AI translations directly from the WordPress post editor using a dedicated AJAX-powered TinyMCE visual interface (does not consume credits).
+- 🎚️ **Concurrency Control** - Set `Max Concurrent Translations` to limit how many background jobs hit your AI server simultaneously.
+- 🚀 **Auto-Translate on Save (Pre-warming)** - Optionally queues and translates posts in the background for selected target languages when published or updated.
+- 🛡️ **Advanced HTML Chunking** - Safely translates long WordPress posts by splitting them into smart HTML/Gutenberg-aware chunks while preserving tags and shortcodes.
+- 🧩 **Static Strings Manager** - Translate headers, footers, and widgets once, and display them dynamically using `[ft_string id="..."]` (accessible to Admins and, optionally, Editors/Moderators).
 - 🔄 **Multiple Translation Services**:
-  - **Local AI (Ollama via Flask) / LibreTranslate** - Self-hosted for ultimate privacy and zero recurring costs.
-  - **Google Translate (Free)** - Hash-based official Google Translator widget.
-  - **Google Cloud Translation API** - Official paid service (~$20 per 1M characters).
-- 🎯 **Language Detection Modes**: Automatic (Browser) or Manual (Admin default).
-- 📦 **Smart Caching system** - Set a custom TTL (days) or set it to `0` for infinite cache.
-- 🛑 **Exclude specific pages or posts** / **Excluded words** from being translated.
+  - **Ollama (Local AI Server)** - Direct integration with local LLMs.
+  - **OpenAI Engine (OpenAI / MLX-LM / LM Studio / vLLM)** - Standard OpenAI Chat Completions API.
+  - **LibreTranslate API** - Self-hosted or remote LibreTranslate-compatible endpoints.
+  - **Google Cloud Translation API** - Official paid API.
+  - **Google Hash (Free/On-the-fly)** - Client-side Google Translate widget.
+- 🎯 **Language Detection Modes**: Automatic (Browser) or Manual (Admin default), plus optional SEO-friendly subdirectory permalinks (`/it/my-post/`).
+- 📦 **Custom Database Cache** - Dedicated database table with configurable TTL (days) or `0` for permanent cache.
+- 🛑 **Exclude specific posts** and define **Excluded words** that must never be translated.
 
 ---
 
 ## Requirements
 
-- WordPress 5.x or newer
+- WordPress 5.8 or newer
 - PHP 7.4+
 - **One of the following**:
-  - A local/remote Flask bridge connected to **Ollama** (e.g., running `gemma3n:e2b` or similar LLMs in ollama/library website).
-  - A local or remote instance of [LibreTranslate](https://github.com/uav4geo/LibreTranslate) (default: `http://localhost:5000`).
+  - A local or remote **Ollama** server (e.g., `http://localhost:11434`).
+  - **Apple MLX-LM** (`mlx_lm.server`), **LM Studio**, **vLLM**, or an **OpenAI** API key (`https://api.openai.com/v1/chat/completions`).
+  - A local or remote instance of [LibreTranslate](https://github.com/uav4geo/LibreTranslate) or a Flask bridge (default: `http://localhost:5000/translate`).
   - Google Cloud Translation API key.
-  - Internet connection (for free Google Translate).
+  - Internet connection (for client-side Google Hash mode).
 
 ---
 
@@ -70,7 +78,7 @@
 1. Clone or download this repository.
 2. Upload the plugin to your WordPress `/wp-content/plugins/` directory.
 3. Activate it from the WordPress **Plugins** admin screen.
-4. Configure your preferred translation service in **Settings → FreedomTranslate**.
+4. Configure your preferred translation service in **WordPress Admin → FreedomTranslate**.
 
 ---
 
@@ -82,79 +90,99 @@ Use the shortcode anywhere in your theme or posts:
 
 ```text
 [freedomtranslate_selector]
-
 ```
 
-This will render a dropdown with all enabled languages and a mode indicator icon:
+This renders a dropdown with all site-enabled languages and a mode indicator icon:
 
 * 🌐 = Automatic browser detection
 * 📌 = Manual admin-defined default
 
 ### Static Strings (Headers/Footers)
 
-To translate global theme elements that are not part of the standard post content:
+To translate global theme elements that are not part of standard post content:
 
-1. Go to **Settings → FreedomTranslate → Static Strings**.
+1. Go to **FreedomTranslate → Static Strings**.
 2. Add a new string (e.g., ID: `footer_credits`, Text: `All rights reserved`).
-3. The plugin will instantly translate it. Use the shortcode inside your theme/widget:
+3. The plugin queues translations for all enabled languages. Use the shortcode inside your theme/widget:
 ```text
 [ft_string id="footer_credits"]
-
 ```
-
-
 
 ### Language Detection Modes
 
-**Automatic Mode** 🌐: Detected from user's browser. User can change it anytime.
-**Manual Mode** 📌: Admin sets a default language. No browser detection.
+* **Automatic Mode** 🌐: Detected from the visitor's browser `Accept-Language` header. Visitors can switch languages anytime.
+* **Manual Mode** 📌: Admin sets a default language when no cookie/query/pretty URL is present.
 
 ### Manual Translation Editing
 
-If you need to correct or tweak an AI-generated translation:
+If you need to correct or write a translation manually (without consuming credits):
 
 1. Open the post or page in the WordPress editor.
 2. Scroll down to the **FreedomTranslate - Manual Editor** metabox.
-3. Select the target language from the dropdown to fetch the current translation from the database.
+3. Select the target language from the dropdown to fetch the current translation from the cache.
 4. Edit the Translated Title, Excerpt, or Content using the integrated visual editor (TinyMCE).
 5. Click **Save Manual Translation**.
 
-*Note: Manual edits are saved directly to the custom translation cache. If you trigger a new automatic background translation for that specific post and language, your manual edits will be overwritten by the new AI generation.*
+*Note: Manual edits are saved directly to the custom translation cache. Triggering a new background translation for that post and language via Direct Translate will overwrite manual edits.*
+
+### Exclude Posts or Pages & Target Languages
+
+In the sidebar **FreedomTranslate Options** metabox of any public post type, users with `edit_post` permission can:
+* **Exclude from translation**: Prevent cached translations from being displayed on that post.
+* **Show language selector**: Automatically prepend `[freedomtranslate_selector]` to the post content.
+* **Target Languages (Auto-Translate)**: Select which admin-approved languages should be translated when *Auto-Translate on Save* is active, and view their remaining credit balance.
 
 ---
 
-## Admin Panel
+## Admin & Workspace Panel
 
 Navigate to:
 
-**WordPress Admin → Settings → FreedomTranslate**
+**WordPress Admin → FreedomTranslate**
 
-The panel is now organized into powerful, dynamic tabs:
+Tabs are dynamically shown based on your WordPress role and permissions:
 
-### General & API
+### General & API *(Administrator only)*
 
-* **Select Engine**: Choose between AI/LibreTranslate, Google Free, or Google Official.
-* **API Configuration**: Enter your endpoints (e.g., your Flask Python server IP).
-* **Processing Mode**: Choose Async (Background) or Sync (Real-time).
-* **Max Concurrent Translations**: Throttle your AI server. Set to `1` if you are sharing your local AI hardware with other apps (like a Chatbot).
-* **Automation & Cache**: Enable/Disable "Auto-Translate on Save" (disable for Strict Manual Mode) and manage global Cache TTL.
+* **Select Engine**: Choose between Ollama (Local AI Server), OpenAI Engine (OpenAI / MLX-LM / LM Studio / vLLM), LibreTranslate API, Google Translate Official API, or Google Hash.
+* **API & Model Configuration**:
+  * **Ollama**: Configure server URL, model name, `num_ctx`, `keep_alive`, and `think: false`.
+  * **OpenAI Engine**: Configure API URL (e.g., `http://localhost:11435/v1/chat/completions` or `https://api.openai.com/v1/chat/completions`), optional Bearer `API Secret Key`, `OpenAI / MLX Model`, `Max Tokens`, and `Disable AI Thinking (MLX / vLLM)` (`chat_template_kwargs.enable_thinking = false`, automatically omitted when calling `api.openai.com`).
+* **Display Settings**: Toggle and customize the AI translation notice label shown on translated posts.
+* **Cache & Background Performance**: Enable/disable *Auto-Translate on Save*, set global Cache TTL, `Max Concurrent Translations`, `HTML Chunk Size`, and `AI API Timeout`.
+* **Content Protection**: Define excluded words/brand names.
 
-### Languages
+### Languages *(Administrator only)*
 
-* Enable or disable specific languages from the available list.
+* Drag and drop to set language translation priority.
+* Enable/disable languages site-wide and independently control which languages are **Selectable in Editor / Direct Translate** by authors.
+* Enable or disable SEO-friendly subdirectory permalinks (`/it/my-post/`).
 
-### Direct Translate & Queue
+### Credits & Permissions *(Administrator only)*
 
-* **Direct Translate**: Select a specific Post/Page, select target languages, and push them directly to the queue. Perfect for overnight batch translations.
-* **Unified Queue Monitor**: View currently processing translations and clear the queue if needed.
+* Enable or disable the translation credits system (`1 credit = 1 target language translation for a post`).
+* Set the automatic reset schedule (**Monthly** or **Daily**) and **Global Default Limit**.
+* Select which WordPress roles (including custom roles such as `Moderator`) can access the FreedomTranslate workspace.
+* Optionally allow Editors/Moderators (`edit_others_posts`) to manage **Static Strings**.
+* Search users to set custom per-user credit overrides (`-1` for Unlimited, empty to inherit Global Default) or manually reset a user's current usage.
 
-### Static Strings
+### Direct Translate & Queue Monitor *(Enabled Roles)*
 
-* Manage and translate custom strings for Headers, Footers, and Widgets.
+* **Direct Translate**: Paste a post URL or ID, choose from admin-allowed languages, and push jobs directly to the queue (scoped to posts you can edit via `edit_post`, checking and deducting credits atomically).
+* **Queue Monitor**: Monitor live chunk progress, pause, resume, or cancel jobs. Administrators see all jobs (plus the global Panic Button); non-admin users only see and control jobs for posts they are allowed to edit.
 
-### Tools
+### Static Strings *(Administrators & optionally Editors/Moderators)*
 
-* **Clear translation cache**: One-click button to flush all saved translations.
+* Manage and translate custom strings for Headers, Footers, and Widgets. Global repair and purge tools remain restricted to Administrators.
+
+### Tools & Database *(Administrator only)*
+
+* **Clear ALL Database Cache**: Flush all cached translations across the site.
+* **Translated Posts Registry**: Inspect and selectively clear cached translations per post.
+
+### Roles & My Limits *(All Enabled Roles)*
+
+* View your current WordPress role(s), credit usage, remaining balance, next reset date, active capabilities, allowed target languages, and the full role permissions matrix configured by the Administrator.
 
 ---
 
@@ -178,32 +206,25 @@ The panel is now organized into powerful, dynamic tabs:
 | sv | Swedish | tr | Turkish |
 | uk | Ukrainian | vi | Vietnamese |
 
-You can limit which languages are available via the admin interface.
+You can limit both site-wide languages and author-selectable languages via the **Languages** tab.
 
 ---
 
-## Local AI Setup (Ollama / Flask)
+## Local AI Setup (Ollama / MLX-LM / Flask)
 
-For the ultimate private translation server:
+You can connect FreedomTranslate **directly** to your AI server without needing any intermediate script:
 
-1. Run **Ollama** on your local machine or dedicated server.
-2. Pull an LLM optimized for translations (e.g., `ollama pull gemma3n:e2b`).
-3. Run a **Flask Python bridge** to handle incoming requests from WordPress, chunk the HTML, and communicate with Ollama.
-4. In *FreedomTranslate → General & API*, point the Custom API URL to your Flask server (e.g., `http://localhost:5000/translate` or `http://192.168.1.X:5000/translate`).
-5. Set `Max Concurrent Translations` based on your hardware capabilities to avoid Out-Of-Memory (OOM) errors.
+* **Ollama**: Select `Ollama (Local AI Server)` in *General & API* and set the API Server URL to `http://localhost:11434`.
+* **Apple MLX-LM / LM Studio / vLLM / OpenAI**: Select `OpenAI Engine (OpenAI / MLX-LM / LM Studio / vLLM)` in *General & API*, set the API Server URL to your `/v1/chat/completions` endpoint (e.g., `http://localhost:11435/v1/chat/completions` or `https://api.openai.com/v1/chat/completions`), enter your model name (e.g., `mlx-community/gemma-4-12B-it-4bit` or `gpt-4o-mini`), and optionally provide your `API Secret Key` (sent as `Authorization: Bearer ...`).
 
-### 💡 Bonus: Example Flask Bridge for Ollama
+### 💡 Bonus: Optional Flask Bridge for Custom Setups
 
-LibreTranslate use a specific JSON format for translation requests and no need of other scripts.
-Ollama, however, expects a different format (prompts and models), to make them talk to each other perfectly you can run a lightweight Python "bridge" using Flask.
-
-Here is a ready-to-use example script.
+If you still prefer routing requests through a custom Python Flask bridge using the `LibreTranslate API` format, here is an example script:
 
 **1. Install required Python packages:**
 
 ```bash
 pip install flask requests flask-cors
-
 ```
 
 **2. Create a file named `app.py` and paste this code:**
@@ -225,11 +246,11 @@ app = Flask(__name__)
 # =============================================================
 # OLLAMA & MODEL CONFIGURATION
 # =============================================================
-OLLAMA_URL = "[http://127.0.0.1:11434/api/generate](http://127.0.0.1:11434/api/generate)"
-MODEL_NAME = "gemma3:4b" # Customize this with your preferred local model
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+MODEL_NAME = "gemma3:4b"  # Customize this with your preferred local model
 
 # =============================================================
-# ACTIVE JOBS REGISTRY (hashkey → threading.Event)
+# ACTIVE JOBS REGISTRY (hashkey -> threading.Event)
 # =============================================================
 _jobs_lock = threading.Lock()
 _active_jobs = {}
@@ -260,17 +281,11 @@ def clean_translation(text: str) -> str:
     Cleans the output from thinking blocks, spurious HTML tags,
     markdown formatting, or labels erroneously added by the model.
     """
-    # 1. Remove the entire <thinking>...</thinking> block (typical in newer models)
     cleaned = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-
-    # 2. Remove any prefixes like "Text:" or "Testo:"
     cleaned = re.sub(r'^(Text:\s*|Testo:\s*)', '', cleaned, flags=re.IGNORECASE).strip()
-    
-    # 3. Strip hallucinated markdown code blocks (e.g., ```html and closing ```)
     cleaned = re.sub(r'^```[a-zA-Z]*\s*', '', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'\s*```$', '', cleaned)
 
-    # 4. List of single labels to preserve if the text consists ONLY of them
     single_labels = [
         "city name", "country", "address", "street", "zip code",
         "postal code", "state", "province", "email", "phone number"
@@ -279,13 +294,10 @@ def clean_translation(text: str) -> str:
     if cleaned.lower() in single_labels:
         return cleaned
 
-    # 5. Cleanup of complex patterns (e.g., "City name (optional)")
     pattern = r"\b(city name|country|address|street|zip code|postal code|state|province|email|phone number)\s*\([^)]*(optional|probably|translation|untranslated)[^)]*\)"
     cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\([^)]*(optional|probably|translation|untranslated)[^)]*\)", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"(City name|Country|Address|Street|Zip code|Postal code|State|Province|Email|Phone number)", "", cleaned, flags=re.IGNORECASE)
-
-    # 6. Remove double spaces and trim edges
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
 
     return cleaned
@@ -294,36 +306,30 @@ def clean_translation(text: str) -> str:
 # OLLAMA DIRECT CALL
 # =============================================================
 def call_ollama(prompt, stop_event=None):
-    """
-    Sends the request to Ollama with optimized parameters.
-    If stop_event is already set before the call, it aborts immediately.
-    """
     if stop_event and stop_event.is_set():
-        print(f"[OLLAMA] Job cancelled before initiating the call.")
+        print("[OLLAMA] Job cancelled before initiating the call.")
         return None
 
     payload = {
         "model": MODEL_NAME,
         "prompt": prompt,
         "stream": False,
-        "raw": False,      # Allows Ollama to use the model's native template
-        "keep_alive": -1,  # KEEPS MODEL IN RAM FOREVER (Prevents slow cold starts)
+        "raw": False,
+        "keep_alive": -1,
         "options": {
-            "temperature": 0.1,    # Low temp for highly accurate translations
+            "temperature": 0.1,
             "top_p": 0.9,
-            "num_predict": 4096,   # Max length of the generated response
-            "num_ctx": 8192        # Context window optimized for large text chunks
+            "num_predict": 4096,
+            "num_ctx": 8192
         }
     }
 
     try:
-        # Timeout at 900s (15m) to allow heavy local processing without breaking connections
         response = requests.post(OLLAMA_URL, json=payload, timeout=900)
         response.raise_for_status()
 
-        # Post-response check: discard the result if cancellation arrived during generation
         if stop_event and stop_event.is_set():
-            print(f"[OLLAMA] Job cancelled after generation, result discarded.")
+            print("[OLLAMA] Job cancelled after generation, result discarded.")
             return None
 
         return response.json().get('response', '').strip()
@@ -335,9 +341,6 @@ def call_ollama(prompt, stop_event=None):
 # TRANSLATION LOGIC & PROMPTING
 # =============================================================
 def translate_logic(text, source_lang, target_lang, is_html=False, stop_event=None):
-    """
-    Builds the correct prompt and handles the translation pipeline.
-    """
     if source_lang.lower() == target_lang.lower():
         return text
 
@@ -371,26 +374,19 @@ def translate_logic(text, source_lang, target_lang, is_html=False, stop_event=No
 # =============================================================
 @app.route('/translate', methods=['POST'])
 def translate_route():
-    """
-    Main endpoint for text and HTML translation.
-    Accepts 'q' (text), 'source', 'target', and 'format' parameters.
-    Optionally supports 'job_id' to allow asynchronous cancellation.
-    """
     data = request.get_json() if request.is_json else request.form
 
     text = data.get('q', data.get('text', ''))
     source = data.get('source', 'auto')
     target = data.get('target', 'en')
-    format_type = data.get('format', 'text')  
-    job_id = data.get('job_id', None)         
+    format_type = data.get('format', 'text')
+    job_id = data.get('job_id', None)
 
     if not text:
         return jsonify({'error': 'Missing text parameter'}), 400
 
-    # Enhanced HTML detection
     is_html = (format_type == 'html') or ('<' in text and '>' in text)
 
-    # Register the job if a job_id is provided
     stop_event = None
     if job_id:
         stop_event = register_job(job_id)
@@ -403,7 +399,6 @@ def translate_route():
             unregister_job(job_id)
             print(f"[JOB] Removed job_id={job_id}")
 
-    # Signal cancellation in the response if the stop event was triggered
     if stop_event and stop_event.is_set():
         return jsonify({'translatedText': None, 'cancelled': True}), 200
 
@@ -412,30 +407,20 @@ def translate_route():
 
 @app.route('/cancel', methods=['POST'])
 def cancel_route():
-    """
-    Endpoint to cancel an ongoing translation job.
-
-    Expected JSON body for single cancellation:
-        { "job_id": "<hashkey>" }
-    Expected JSON body for bulk cancellation:
-        { "job_ids": ["<hashkey1>", "<hashkey2>"] }
-    """
     data = request.get_json(silent=True) or {}
 
-    # Single job cancellation
     if 'job_id' in data:
         job_id = data['job_id']
         found = cancel_job(job_id)
-        print(f"[CANCEL] job_id={job_id} → {'cancelled' if found else 'not found'}")
+        print(f"[CANCEL] job_id={job_id} -> {'cancelled' if found else 'not found'}")
         return jsonify({'status': 'cancelled' if found else 'not_found', 'job_id': job_id})
 
-    # Bulk cancellation
     if 'job_ids' in data:
         results = {}
         for jid in data['job_ids']:
             found = cancel_job(jid)
             results[jid] = 'cancelled' if found else 'not_found'
-            print(f"[CANCEL BULK] job_id={jid} → {results[jid]}")
+            print(f"[CANCEL BULK] job_id={jid} -> {results[jid]}")
         return jsonify({'status': 'ok', 'results': results})
 
     return jsonify({'error': 'Missing job_id or job_ids parameter'}), 400
@@ -443,9 +428,6 @@ def cancel_route():
 
 @app.route('/status', methods=['GET'])
 def status_route():
-    """
-    Debug endpoint: lists currently active translation jobs.
-    """
     with _jobs_lock:
         active = {jid: ev.is_set() for jid, ev in _active_jobs.items()}
     return jsonify({'active_jobs': active, 'count': len(active)})
@@ -455,22 +437,17 @@ def status_route():
 # SERVER STARTUP
 # =============================================================
 if __name__ == '__main__':
-    # Running on 127.0.0.1 to prevent unauthorized external network access.
-    # Change to '0.0.0.0' only if you need to expose the API to your local LAN.
-    app.run(host='127.0.0.1', port=5005, threaded=True)
-
+    app.run(host='127.0.0.1', port=5000, threaded=True)
 ```
 
 **3. Run the bridge:**
 
 ```bash
 python3 app.py
-
 ```
 
 **4. Connect the Plugin:**
-In your WordPress admin, go to **FreedomTranslate → General & API**. Select `AI / LibreTranslate` as the engine, and set the Custom API URL to:
-`http://YOUR_SERVER_IP:5000/translate` (or `http://localhost:5000/translate` if running on the same machine as WordPress).
+In your WordPress admin, go to **FreedomTranslate → General & API**. Select `LibreTranslate API` and set the API Server URL to `http://127.0.0.1:5000/translate`.
 
 ---
 
@@ -480,58 +457,62 @@ To use the official Google Cloud Translation API (optional):
 
 1. Create a project at [Google Cloud Console](https://console.cloud.google.com/)
 2. Enable the **Cloud Translation API** and set up billing.
-3. Create an API key and enter it in **FreedomTranslate Settings → General & API**.
+3. Create an API key and enter it in **FreedomTranslate → General & API**.
 
 ---
 
 ## Notes
 
-* **AI Server Load Balancing**: The new Unified Queue ensures your server never crashes, even if you translate a massive post into 10 languages at once.
-* **Strict Manual Mode**: If you use your AI server for multiple tasks during the day, disable "Auto-Translate on save". Use the *Direct Translate* panel at night to process translations while you sleep.
-* Translations are cached using WordPress options to improve performance. Cache TTL can be set to `0` to make translations permanent.
+* **AI Server Load Balancing**: The Unified Queue ensures your server never crashes, even if you translate a massive post into multiple languages at once.
+* **No On-Visit Bottlenecks**: Because frontend page visits only perform read-only lookups against cached translations, traffic spikes and crawlers never overload your translation server.
+* Translations are stored in a dedicated custom database table (`{$wpdb->prefix}freedomtranslate_cache`) to keep `wp_options` clean and fast. Cache TTL can be set to `0` to make translations permanent.
 
 ---
 
 ## What's New
 
+**v2.4.0**
+
+* 🤖 **OpenAI Engine (OpenAI / MLX-LM / LM Studio / vLLM)**: Added native `/v1/chat/completions` support with Bearer auth, configurable model, dynamic `max_tokens`, and optional `chat_template_kwargs.enable_thinking = false` (automatically omitted for `api.openai.com`).
+* 💳 **Credits & Quotas System**: Added admin-only configurable translation credits (`1 credit = 1 target language translation for a post`) with automatic Daily or Monthly resets and per-user overrides (`-1` for Unlimited).
+* 👥 **Role-Based Access Control**: Moved to a dedicated top-level **FreedomTranslate** menu. Admins can enable specific WordPress roles (Editors, Moderators, Authors, custom roles) to use *Direct Translate* and *Queue Monitor* scoped to posts they can edit (`edit_post`), and optionally allow Editors/Moderators to manage *Static Strings*.
+* 🌐 **Author Target Language Restrictions**: Admins can control which enabled languages authors/editors may select in the Post Editor metabox and *Direct Translate*.
+* 📊 **New Tabs**: Added **Credits & Permissions** (Admin-only) and **Roles & My Limits** (clear quota and capability overview for every enabled user).
+* ⚡ **Performance & Security Hardening**: Removed on-visit/synchronous translation, *Strict Manual Mode*, and bot signature filtering. Frontend requests now strictly serve pre-cached translations.
+
 **v2.0.2**
 
 * ✍️ **Manual Translation Editor**: Added a dedicated AJAX-powered visual editor (Metabox) to safely fine-tune and override AI translations per post without touching the core WordPress content.
 
-**v1.9.3 (Massive Backend Overhaul)**
+**v1.9.3**
 
-* ✨ **Unified Translation Queue**: No more server crashes! Translations are now elegantly queued and processed sequentially based on your hardware limits.
-* 🎛️ **Direct Translate Panel**: Brand new admin tab to manually push posts to the translation queue. Ideal for overnight batch processing.
-* 🚦 **Concurrency Control**: Added `Max Concurrent Translations` setting to throttle requests to local AI servers (perfect for Ollama multitasking).
-* 🧠 **Local AI & Ollama Optimization**: Enhanced HTML chunking support to work flawlessly with local LLMs (like Gemma 4) via Flask API bridges.
-* ⏸️ **Strict Manual Mode**: Ability to safely decouple translation from the "Save Post" action to manage server load.
+* ✨ **Unified Translation Queue**: Translations are queued and processed sequentially/concurrently based on your hardware limits.
+* 🎛️ **Direct Translate Panel**: Manually push posts to the translation queue.
+* 🚦 **Concurrency Control**: Added `Max Concurrent Translations` setting to throttle requests to local AI servers.
+* 🧠 **Local AI & Ollama Optimization**: Enhanced HTML chunking support to work with local LLMs.
 
 **v1.5.5**
 
-* Massive UI Overhaul with dynamic tabbed Admin Panel.
-* Auto-Prewarm on Save functionality.
-* Static Strings Manager (`[ft_string]`).
-* Infinite Cache (TTL `0`).
+* Tabbed Admin Panel, Auto-Prewarm on Save, Static Strings Manager (`[ft_string]`), and Infinite Cache (`TTL 0`).
 
 **v1.4.5 & Below**
 
-* Added Google Translate support (Free + Official API).
-* Language detection modes (Auto/Manual).
+* Added Google Translate support and language detection modes (Auto/Manual).
 
 ---
 
 ## Author
 
-**Freedom** 2026 – Licensed under [GPLv3 or later](https://www.google.com/search?q=LICENSE)
+**Freedom** 2026 – Licensed under [GPLv3 or later](https://www.gnu.org/licenses/gpl-3.0.html)
 
 ---
 
 ## License
 
-This plugin is released under the GNU GPLv3 license. See [LICENSE](https://www.google.com/search?q=LICENSE) for full details.
+This plugin is released under the GNU GPLv3 license. See [LICENSE](LICENSE) for full details.
 
 ---
 
 ## Disclaimer
 
-This plugin is not affiliated with or endorsed by LibreTranslate, Google Translate, Ollama, or their respective developers. "LibreTranslate", "Ollama", and "Google Translate" are used solely to describe the APIs and engines that this plugin can interact with.
+This plugin is not affiliated with or endorsed by LibreTranslate, Google Translate, Ollama, OpenAI, Apple MLX, or their respective developers. "LibreTranslate", "Ollama", "OpenAI", "MLX-LM", and "Google Translate" are used solely to describe the APIs and engines that this plugin can interact with.
